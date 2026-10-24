@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   plugin:
-    name: Server plugin (CounterStrikeSharp)
+    name: Web player (CounterStrikeSharp)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,53 +19,102 @@ jobs:
         with:
           dotnet-version: "10.0.x"
       - name: Build
-        run: dotnet publish plugin/CS2VoiceRelay.csproj -c Release -o out/addons/counterstrikesharp/plugins/CS2VoiceRelay
+        run: dotnet publish plugin/CS2VoiceRelay.csproj -c Release -o out/CS2VoiceRelay
       - name: Check output
         run: |
-          ls -la out/addons/counterstrikesharp/plugins/CS2VoiceRelay
-          if ls out/addons/counterstrikesharp/plugins/CS2VoiceRelay | grep -qv '^CS2VoiceRelay\.'; then
+          ls -la out/CS2VoiceRelay
+          if ls out/CS2VoiceRelay | grep -qv '^CS2VoiceRelay\.'; then
             echo '::error::Plugin output contains dependency DLLs; CounterStrikeSharp must not be bundled'; exit 1
           fi
-      - name: Package
-        run: cd out && zip -r ../CS2VoiceRelay-plugin.zip addons
       - uses: actions/upload-artifact@v4
         with:
           name: plugin
-          path: CS2VoiceRelay-plugin.zip
+          path: out/CS2VoiceRelay
 
-  client:
-    name: Voice client (Windows)
-    runs-on: windows-latest
+  tap-linux:
+    name: Voice tap (Metamod, Linux)
+    runs-on: ubuntu-latest
+    container: registry.gitlab.steamos.cloud/steamrt/sniper/sdk
+    env:
+      XMAKE_ROOT: y
+      HL2SDKCS2: ${{ github.workspace }}/deps/hl2sdk-cs2
+      MMSOURCE112: ${{ github.workspace }}/deps/metamod-source
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install
+      - name: Checkout SDK dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r client/requirements.txt pyinstaller
-      - name: Build executable
-        run: pyinstaller --onefile --windowed --name CS2VoiceRelay client/voiceclient.py
-      - name: Package
-        run: Compress-Archive -Path dist/CS2VoiceRelay.exe, client/voiceclient.py, client/requirements.txt -DestinationPath CS2VoiceRelay-client-windows.zip
+          git clone --depth 1 -b cs2 https://github.com/alliedmodders/hl2sdk deps/hl2sdk-cs2
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/alliedmodders/metamod-source deps/metamod-source
+      - name: Install xmake
+        run: |
+          curl -fsSL https://xmake.io/shget.text | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build
+        working-directory: native
+        run: |
+          xmake f -p linux -a x86_64 -m release -y
+          xmake -y
       - uses: actions/upload-artifact@v4
         with:
-          name: client
-          path: CS2VoiceRelay-client-windows.zip
+          name: tap-linux
+          path: native/build/linux/x86_64/release/libCS2VoiceRelayTap.so
 
-  release:
-    name: Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [plugin, client]
+  tap-windows:
+    name: Voice tap (Metamod, Windows)
+    runs-on: windows-latest
+    env:
+      HL2SDKCS2: ${{ github.workspace }}/deps/hl2sdk-cs2
+      MMSOURCE112: ${{ github.workspace }}/deps/metamod-source
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout SDK dependencies
+        run: |
+          git clone --depth 1 -b cs2 https://github.com/alliedmodders/hl2sdk deps/hl2sdk-cs2
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/alliedmodders/metamod-source deps/metamod-source
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+      - name: Build
+        working-directory: native
+        run: |
+          xmake f -p windows -a x64 -m release -y
+          xmake -y
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tap-windows
+          path: native/build/windows/x64/release/CS2VoiceRelayTap.dll
+
+  package:
+    name: Package
+    needs: [plugin, tap-linux, tap-windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - uses: softprops/action-gh-release@v2
+      - name: Build server archives
+        run: |
+          VERSION="${GITHUB_REF_NAME//\//-}"
+          for os in linux windows; do
+            root="dist/$os/addons"
+            mkdir -p "$root/counterstrikesharp/plugins/CS2VoiceRelay" "$root/cs2voicerelay_tap" "$root/metamod"
+            cp artifacts/plugin/* "$root/counterstrikesharp/plugins/CS2VoiceRelay/"
+            cp native/packaging/cs2voicerelay_tap.vdf "$root/metamod/"
+          done
+          # Lowercase binary names match the vdf exactly; some host panels lowercase uploads
+          cp artifacts/tap-linux/libCS2VoiceRelayTap.so dist/linux/addons/cs2voicerelay_tap/cs2voicerelay_tap.so
+          cp artifacts/tap-windows/CS2VoiceRelayTap.dll dist/windows/addons/cs2voicerelay_tap/cs2voicerelay_tap.dll
+          tar -czf "CS2VoiceRelay-${VERSION}-linux.tar.gz" -C dist/linux addons
+          (cd dist/windows && zip -qr "../../CS2VoiceRelay-${VERSION}-windows.zip" addons)
+          tar -tzf "CS2VoiceRelay-${VERSION}-linux.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-archives
+          path: CS2VoiceRelay-*
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            artifacts/plugin/CS2VoiceRelay-plugin.zip
-            artifacts/client/CS2VoiceRelay-client-windows.zip
+          files: CS2VoiceRelay-*

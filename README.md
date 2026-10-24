@@ -1,128 +1,114 @@
 # CS2VoiceRelay
 
-Out-of-game voice for CS2 community servers that run Workshop maps.
+Hear in-game voice in your browser when CS2 stops playing it.
 
-CS2's own voice chat breaks on the **client** after a Workshop map unloads: switching between
-Workshop maps, rejoining a server that's on one, or going back to a stock map leaves players
-unable to hear anyone until they restart the game. Valve has tracked this since January 2025
-([csgo-osx-linux#3980](https://github.com/ValveSoftware/csgo-osx-linux/issues/3980)); the
-client deletes the shared sound it plays all incoming voice through and never recreates it.
-Nothing a server sends can repair that, so no server plugin can fix in-game voice.
+CS2's own voice playback breaks on the **client** after a Workshop map unloads: switching
+between Workshop maps, rejoining a server that's on one, or going back to a stock map leaves
+players unable to hear anyone until they restart the game. Valve has tracked this since January
+2025 ([csgo-osx-linux#3980](https://github.com/ValveSoftware/csgo-osx-linux/issues/3980)): the
+client deletes the shared sound all incoming voice plays through and never recreates it.
+Nothing a server sends can repair that.
 
-CS2VoiceRelay sidesteps it: a small voice client on each player's PC captures and plays audio,
-and a CounterStrikeSharp plugin on the server relays it between them. The game is only used
-for identity, team/alive state and the server's voice rules, so **players hear exactly what
-the server would normally let them hear**, and it keeps working across every map change.
+Talking still works; only hearing breaks. So CS2VoiceRelay leaves the microphone side alone and
+fixes the receiving side: the server streams the voice it would have sent you to a web page you
+keep open next to the game.
 
-## What you get
+- Players talk in game exactly as before, with their normal push-to-talk key.
+- Open the page (`http://your-server:27030`), click **Start listening**, and switch back to CS2.
+- The page waits until you've joined the server, recognises you by your IP, and plays exactly
+  the voice your game would have received: team rules, `sv_alltalk`, dead talk, mutes and every
+  other routing decision are the engine's own.
+- While the page is listening, the server stops sending you the in-game copy, so if your CS2
+  voice still works you don't hear everyone twice. Close the tab and in-game voice is back within
+  two seconds.
+- Volume control for everyone and per player, remembered between visits. No install, no
+  microphone permission, works over plain HTTP in any modern browser.
 
-- **Server plugin** (`plugin/`, CounterStrikeSharp): UDP relay on a second port. Enforces the
-  server's real voice cvars (`sv_alltalk`, `sv_deadtalk`, `sv_full_alltalk`,
-  `sv_talk_enemy_dead`, `sv_talk_enemy_living`, `sv_spec_hear`, `sv_voiceenable`) and admin
-  mutes (`VoiceFlags.Muted`), so the relay never lets anyone hear more than the game would.
-  Shows who's talking as a HUD line, since the real voice icons can't be driven.
-- **Voice client** (`client/`, Python, or the prebuilt `CS2VoiceRelay.exe`): push-to-talk using
-  your CS2 `+voicerecord` bind (read from your local Steam install), live player list with team,
-  alive/dead, who you can currently hear and who's speaking, mic meter, device selection,
-  local per-player mute. All of that information is pushed to the client by the plugin.
+## How it works
+
+```
+player's game ──voice──▶ CS2 server ──svc_VoiceData──▶ your game (playback broken)
+                              │
+               CS2VoiceRelayTap (Metamod) copies it after the engine's routing
+                              │ localhost UDP
+               CS2VoiceRelay (CounterStrikeSharp) ──WebSocket──▶ your browser (Opus, WebAssembly)
+```
+
+- **`native/`, CS2VoiceRelayTap**: a Metamod plugin hooking `CServerSideClient::SendNetMessage`.
+  For every `svc_VoiceData` the engine sends a player, it forwards the speaker's SteamID and the
+  Opus audio to `127.0.0.1:27031`. It can hold back the in-game copy for players who are
+  listening in a browser; that instruction expires after two seconds unless the plugin keeps
+  renewing it, so in-game voice can't stay switched off if the plugin stops.
+- **`plugin/`, CS2VoiceRelay**: a CounterStrikeSharp plugin that serves the page and a WebSocket
+  on TCP 27030, matches each browser to a player by IP, and forwards that player's voice to it.
+  When several players share one IP, the page asks which one you are and confirms with a code
+  sent to that player's chat.
+- **`plugin/web/`**: the page; Opus is decoded with
+  [opus-decoder](https://github.com/eshaz/wasm-audio-decoders) (WebAssembly, MIT).
 
 ## Install (server)
 
-1. Install [CounterStrikeSharp](https://docs.cssharp.dev/) (v1.0.378 or newer).
-2. Download `CS2VoiceRelay-plugin.zip` from [Releases](../../releases) and extract it into
-   `game/csgo/` so you have `addons/counterstrikesharp/plugins/CS2VoiceRelay/CS2VoiceRelay.dll`.
-3. Open UDP port **27030** (or whatever you set) on the server's firewall/host panel.
-4. Start the server once; edit `addons/counterstrikesharp/configs/plugins/CS2VoiceRelay/CS2VoiceRelay.json`:
+Requires Metamod:Source 2.0 (dev build 1461 or later) and
+[CounterStrikeSharp](https://docs.cssharp.dev/) v1.0.378 or newer.
 
-   | Key | Default | Meaning |
-   |---|---|---|
-   | `Port` | `27030` | UDP port the relay listens on |
-   | `BindAddress` | `0.0.0.0` | Interface to bind |
-   | `PublicAddress` | `""` | Host players should connect to; shown in the chat hint |
-   | `RequireMatchingIp` | `false` | Only accept a voice client from the same IP as the game connection |
-   | `ShowSpeakerHud` | `true` | Show "who is talking" as a HUD line |
-   | `SessionTimeoutSeconds` | `10` | Drop a voice client after this long without traffic |
-   | `MaxPacketsPerSecond` | `80` | Per-client rate limit (normal speech is 50/s) |
-   | `ForgetAfterSeconds` | `300` | Keep a player's token and voice session this long after they leave the server |
+1. Download the archive for your server's OS from [Releases](../../releases) and extract it into
+   `game/csgo/`. It contains:
+   - `addons/counterstrikesharp/plugins/CS2VoiceRelay/`
+   - `addons/cs2voicerelay_tap/`
+   - `addons/metamod/cs2voicerelay_tap.vdf`
+2. If you used the older CS2VoiceFix plugin, remove `addons/cs2voicefix/` and
+   `addons/metamod/cs2voicefix.vdf`; it hooks the same function and isn't needed.
+3. Open **TCP 27030** in the server's firewall, e.g. on firewalld:
+   `sudo firewall-cmd --permanent --add-port=27030/tcp && sudo firewall-cmd --reload`
+4. Restart the server, then set `PublicUrl` in
+   `addons/counterstrikesharp/configs/plugins/CS2VoiceRelay/CS2VoiceRelay.json`, so the link
+   players see in chat is right.
 
-Players get a token when they join: in chat while they aren't linked, and always as a line in
-their console that the voice client reads automatically. `!voice` shows it in chat again;
-`css_voicerelay` prints just the console line (token plus link status). The token is tied to
-their SteamID, so nobody can transmit as someone else. If `PublicAddress` is empty, the client
-connects to the relay on the same IP as the game server.
+| Key | Default | Meaning |
+|---|---|---|
+| `Port` | `27030` | TCP port of the web page |
+| `BindAddress` | `0.0.0.0` | Interface to listen on |
+| `PublicUrl` | `""` | Link shown to players, e.g. `http://example.com:27030` (default: `http://SERVER-IP:Port`) |
+| `TapPort` | `27031` | Localhost UDP port the Metamod tap sends to. If you change it, also start the server with the environment variable `CS2VR_TAP_PORT` set to the same port |
+| `SuppressGameVoiceForListeners` | `true` | Hold back in-game voice for players listening in a browser |
+| `TrustForwardedFor` | `false` | Behind a reverse proxy on the same machine, use its `X-Forwarded-For` to identify players |
+| `AnnounceOnJoin` | `true` | Tell joining players about the page (at most once every few hours each) |
+| `MaxConnectionsPerIp` | `6` | Browser connections allowed per IP |
 
-The voice client stays connected through map changes and quick rejoins: the token stays the
-same, and the relay keeps the player's session until they've been off the server for
-`ForgetAfterSeconds`. While the next map loads, players who haven't loaded in yet aren't routed
-any audio; nobody has to reconnect the voice client.
+Players can type `!voice` in chat to get the link again and see whether their browser is connected.
 
-## Install (players)
+### Behind a reverse proxy
 
-1. Download `CS2VoiceRelay-client-windows.zip` from [Releases](../../releases) and run
-   `CS2VoiceRelay.exe` (or `python voiceclient.py` with `pip install -r requirements.txt`).
-2. One-time: in Steam, right-click Counter-Strike 2 → Properties → Launch Options and add
-   `-netconport 2121`. This opens CS2's local console port, which the client uses to read
-   which server you're on and fetch your token.
-3. Start the client and CS2, then join a server running CS2VoiceRelay. The client runs `status`
-   and `css_voicerelay` through the console, fills in the server, token and SteamID, and
-   connects by itself. If you switch servers it reconnects to the new one.
-4. Hold your normal voice key. The client shows who you can hear and who's talking.
+The page also works under a path on an existing site, e.g. `https://example.com/voice/`. Proxy
+both HTTP and the WebSocket at `/voice/ws` to `127.0.0.1:27030`, and set `TrustForwardedFor` to
+`true` so players are matched by their real IP. For Apache (`mod_proxy_http`, `mod_proxy_wstunnel`):
 
-Without the launch option, untick **Detect server and token from CS2**, type `!voice` in game,
-and copy the server and token from chat into the client.
-
-The client keeps its settings in `%APPDATA%\CS2VoiceRelay\settings.json`.
-
-### Securing the console port
-
-CS2's console port has no password and listens on every network interface, not just your own
-PC, so anything that can reach it can run console commands in your game. Home routers block it
-from the internet, but on shared networks (LAN events, dorms, campus Wi-Fi) other machines could
-reach it. Block remote access with one command in an administrator PowerShell; the client
-talks to the port from your own PC, which the firewall rule doesn't affect:
-
-```powershell
-New-NetFirewallRule -DisplayName "CS2 console port (block remote)" -Direction Inbound -Protocol TCP -LocalPort 2121 -Action Block
+```apache
+ProxyPass        /voice/ws  ws://127.0.0.1:27030/ws
+ProxyPass        /voice/    http://127.0.0.1:27030/
+ProxyPassReverse /voice/    http://127.0.0.1:27030/
 ```
 
-The client only accepts relay info from the plugin's own console line (start of line, your
-SteamID), so a player can't redirect your voice by typing a look-alike line in chat.
+## Notes and limitations
 
-## How voice routing is enforced
-
-Audio only ever flows server → listener when the plugin's copy of the game's rules says so:
-
-| Situation | Hears? |
-|---|---|
-| `sv_voiceenable 0`, or speaker is admin-muted | never |
-| `sv_full_alltalk 1` | everyone, including spectators |
-| listener is spectator | per `sv_spec_hear` (0 spectators only, 1/2 everyone, 3/4 nobody) |
-| `sv_alltalk 1` | all players |
-| same team, speaker alive | yes |
-| same team, speaker dead | dead listeners yes; living listeners only with `sv_deadtalk 1` |
-| enemies, both alive | only with `sv_talk_enemy_living 1` |
-| enemies, both dead | only with `sv_talk_enemy_dead 1` |
-
-`sv_spec_hear 2` ("spectated team") can't be evaluated outside the game and is treated as 1.
-Players' *client-side* mutes in the scoreboard aren't visible to the server; use the local mute
-in the voice client instead.
-
-## Limitations
-
-- No positional/proximity voice; audio is plain 16 kHz mono PCM (about 32 KB/s per speaker).
-- Everyone who wants voice needs the client running. Players without it still show up in the list.
-- The in-game voice icons don't light up; the HUD line and the client's list replace them.
+- Players are matched by IP. If someone's browser and game reach the server from different
+  addresses (a VPN on one but not the other, or IPv6 for the page and IPv4 for the game), the
+  page will keep waiting; open it with the server's IPv4 address in that case.
+- The in-game speaking icons don't light up while the page is listening; the page shows who's
+  talking instead.
+- Audio adds roughly 80 ms of buffering on top of normal network latency.
+- If a CS2 update changes `CServerSideClient`'s layout, the tap refuses to load (and logs why)
+  rather than hooking the wrong function; the web page then stays silent until it's updated.
 
 ## Building
 
 ```sh
-dotnet publish plugin/CS2VoiceRelay.csproj -c Release -o out   # needs the .NET 10 SDK
-pip install -r client/requirements.txt pyinstaller
-pyinstaller --onefile --windowed --name CS2VoiceRelay client/voiceclient.py
+dotnet publish plugin/CS2VoiceRelay.csproj -c Release -o out   # .NET 10 SDK
+cd native && xmake f -m release -y && xmake                     # needs HL2SDKCS2 and MMSOURCE112
 ```
 
-CI builds both on every push and attaches them to a GitHub Release on `v*` tags.
+CI builds both platforms on every push and publishes ready-to-extract archives on `v*` tags.
 
 ## License
 
-GPL-3.0. The protocol is documented at the top of `plugin/Protocol.cs`.
+GPL-3.0. Bundled opus-decoder is MIT; see `plugin/web/THIRD_PARTY.md`.

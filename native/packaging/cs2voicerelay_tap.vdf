@@ -1,0 +1,5 @@
+"Metamod Plugin"
+{
+	"alias"	"cs2voicerelay_tap"
+	"file"	"addons/cs2voicerelay_tap/cs2voicerelay_tap"
+}
