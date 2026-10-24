@@ -54,6 +54,12 @@
 #include "networksystem/netmessage.h"
 #include "cs2_sdk/serversideclient.h"
 
+// windows.h (via winsock2.h) renames GetMessage to GetMessageA, which breaks
+// google::protobuf::Reflection::GetMessage
+#ifdef GetMessage
+#undef GetMessage
+#endif
+
 #ifdef _WIN32
 #define ROOTBIN "/bin/win64/"
 #define GAMEBIN "/csgo/bin/win64/"
@@ -368,7 +374,7 @@ KHook::Return<bool> CS2VoiceRelayTap::Hook_SendNetMessage(CServerSideClientBase*
 	if ((g_suppressMask.load(std::memory_order_relaxed) >> slot) & 1)
 	{
 		if (NowMs() < g_suppressUntilMs.load(std::memory_order_relaxed))
-			return {KHook::Action::Supercede, true};
+			return {KHook::Action::Supersede, true};
 	}
 
 	return {KHook::Action::Ignore};
