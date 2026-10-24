@@ -63,6 +63,10 @@ player's game ──voice──▶ CS2 server ──svc_VoiceData──▶ your 
   on TCP 27030, matches each browser to a player by IP, forwards that player's voice to it, and
   sends the scoreboard once a second. If several players share an IP, the page asks which one you
   are and confirms with a code sent to that player's chat.
+- **Off the game thread**: the game thread only reads the game into a snapshot twice a second
+  and prints chat. In the tap, the engine's send path just copies the packet into a queue and a
+  sender thread does the networking. In the plugin, voice runs on the UDP receive thread, the
+  site on the web server's threads, and the per-second updates on a worker thread.
 - **`plugin/web/`**: the page. Opus is decoded with
   [opus-decoder](https://github.com/eshaz/wasm-audio-decoders) (WebAssembly, MIT).
 

@@ -88,7 +88,7 @@ public class RelayConfig : BasePluginConfig
 public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 {
     public override string ModuleName => "CS2VoiceRelay";
-    public override string ModuleVersion => "2.3.0";
+    public override string ModuleVersion => "2.3.1";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Hear in-game voice in your browser when CS2's voice playback breaks";
 
@@ -102,6 +102,8 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
     private readonly ScoreTracker _scores = new();
     private ConVar? _cvHostname, _cvIp;
     private bool _warnedTap;
+    private Thread? _worker;
+    private CancellationTokenSource? _workerStop;
 
     public void OnConfigParsed(RelayConfig config)
     {
@@ -229,11 +231,13 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         _web.Start();
         _tap.Start();
 
+        // The game thread only reads the game (twice a second, into an immutable snapshot) and
+        // prints chat. Voice runs on the tap's receive thread, the site on the web server's
+        // threads, and everything periodic on this plugin's own worker thread.
         AddTimer(0.5f, RefreshSnapshot, TimerFlags.REPEAT);
-        AddTimer(0.5f, PushSuppressMask, TimerFlags.REPEAT);
-        AddTimer(1.0f, () => _web?.Tick(), TimerFlags.REPEAT);
-        AddTimer(10f, CheckTap, TimerFlags.REPEAT);
-        AddTimer(5f, () => _prefs?.FlushAsync(), TimerFlags.REPEAT);
+        _workerStop = new CancellationTokenSource();
+        _worker = new Thread(() => WorkerLoop(_workerStop.Token)) { IsBackground = true, Name = "CS2VoiceRelay worker" };
+        _worker.Start();
         if (Config.ReminderIntervalMinutes > 0)
             AddTimer(Config.ReminderIntervalMinutes * 60f, SendReminders, TimerFlags.REPEAT);
 
@@ -311,8 +315,54 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         return $"{Prefix} {text}";
     }
 
+    /// <summary>
+    /// Off the game thread: pushes the page state to browsers every second, renews the tap's
+    /// mute mask twice a second, saves settings and checks on the tap.
+    /// </summary>
+    private void WorkerLoop(CancellationToken stop)
+    {
+        long nextMask = 0, nextTick = 0, nextFlush = 0, nextTapCheck = Environment.TickCount64 + 10_000;
+        while (!stop.IsCancellationRequested)
+        {
+            var now = Environment.TickCount64;
+            try
+            {
+                if (now >= nextMask)
+                {
+                    nextMask = now + 500;
+                    PushSuppressMask();
+                }
+                if (now >= nextTick)
+                {
+                    nextTick = now + 1000;
+                    _web?.Tick();
+                }
+                if (now >= nextFlush)
+                {
+                    nextFlush = now + 5000;
+                    _prefs?.FlushAsync();
+                }
+                if (now >= nextTapCheck)
+                {
+                    nextTapCheck = now + 10_000;
+                    CheckTap();
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning(e, "CS2VoiceRelay worker");
+            }
+            stop.WaitHandle.WaitOne(100);
+        }
+    }
+
     public override void Unload(bool hotReload)
     {
+        _workerStop?.Cancel();
+        _worker?.Join(TimeSpan.FromSeconds(2));
+        _workerStop?.Dispose();
+        _workerStop = null;
+        _worker = null;
         _prefs?.FlushAsync().Wait(TimeSpan.FromSeconds(2));
         _tap?.SendSuppressMask(0, 0);
         _tap?.Dispose();

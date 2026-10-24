@@ -41,6 +41,8 @@
 #include <string.h>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -116,6 +118,24 @@ static std::atomic<int64_t> g_suppressUntilMs{0};
 static std::atomic<bool> g_suppressSilent{false};   // send silence (keeps speaking icons) instead of dropping
 static std::atomic<uint32_t> g_sent{0};
 
+// Voice packets wait here for the sender thread, so the engine's send path only copies bytes
+// and never makes a system call. Full queue (the plugin isn't reading): the packet is dropped.
+constexpr size_t kMaxVoicePacket = 4 + 1 + 8 + 4 + 4 + 1 + 4 + 4 + 4 + 2 + 64 * 4 + 2 + 4096;
+constexpr size_t kQueueSlots = 256;
+struct QueuedPacket
+{
+	uint16_t len;
+	uint8_t data[kMaxVoicePacket];
+};
+static QueuedPacket* g_queue = nullptr;
+static size_t g_queueHead = 0;
+static size_t g_queueCount = 0;
+static bool g_senderWaiting = false;
+static std::mutex g_queueLock;
+static std::condition_variable g_queueWake;
+static std::thread g_senderThread;
+static std::atomic<uint32_t> g_dropped{0};
+
 static int64_t NowMs()
 {
 	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -130,6 +150,53 @@ static void SendToRelay(const uint8_t* data, size_t len)
 	to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	to.sin_port = htons(g_relayPort.load(std::memory_order_relaxed));
 	sendto(g_socket, (const char*)data, (int)len, 0, (const sockaddr*)&to, sizeof(to));
+}
+
+static void QueueToRelay(const uint8_t* data, size_t len)
+{
+	if (len > kMaxVoicePacket)
+		return;
+	bool wake = false;
+	{
+		std::lock_guard<std::mutex> lock(g_queueLock);
+		if (!g_queue || g_queueCount == kQueueSlots)
+		{
+			g_dropped.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		QueuedPacket& slot = g_queue[(g_queueHead + g_queueCount) % kQueueSlots];
+		slot.len = (uint16_t)len;
+		memcpy(slot.data, data, len);
+		g_queueCount++;
+		wake = g_senderWaiting;
+	}
+	if (wake)
+		g_queueWake.notify_one();
+}
+
+static void SenderLoop()
+{
+	static uint8_t packet[kMaxVoicePacket];
+	std::unique_lock<std::mutex> lock(g_queueLock);
+	while (g_running.load())
+	{
+		if (g_queueCount == 0)
+		{
+			g_senderWaiting = true;
+			g_queueWake.wait_for(lock, std::chrono::milliseconds(200));
+			g_senderWaiting = false;
+			continue;
+		}
+		QueuedPacket& slot = g_queue[g_queueHead];
+		size_t len = slot.len;
+		memcpy(packet, slot.data, len);
+		g_queueHead = (g_queueHead + 1) % kQueueSlots;
+		g_queueCount--;
+
+		lock.unlock();
+		SendToRelay(packet, len);
+		lock.lock();
+	}
 }
 
 // The port lives in one place: "TapPort" in the CS2VoiceRelay plugin's own config,
@@ -283,8 +350,12 @@ static bool OpenLink(char* error, size_t maxlen)
 	setsockopt(g_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 #endif
 
+	g_queue = new QueuedPacket[kQueueSlots];
+	g_queueHead = 0;
+	g_queueCount = 0;
 	g_running.store(true);
 	g_controlThread = std::thread(ControlLoop);
+	g_senderThread = std::thread(SenderLoop);
 	ConMsg("[CS2VoiceRelayTap] forwarding voice to 127.0.0.1:%u (port from %s)\n", port, source);
 	return true;
 }
@@ -292,8 +363,17 @@ static bool OpenLink(char* error, size_t maxlen)
 static void CloseLink()
 {
 	g_running.store(false);
+	g_queueWake.notify_all();
+	if (g_senderThread.joinable())
+		g_senderThread.join();
 	if (g_controlThread.joinable())
 		g_controlThread.join();
+	{
+		std::lock_guard<std::mutex> lock(g_queueLock);
+		delete[] g_queue;
+		g_queue = nullptr;
+		g_queueCount = 0;
+	}
 	if (g_socket != TAP_INVALID_SOCKET)
 	{
 		tap_closesocket(g_socket);
@@ -388,7 +468,7 @@ static void ForwardVoice(int recipient, const google::protobuf::Message& msg, co
 	if (data.empty() || data.size() > 4096 || offsetCount > 64)
 		return;
 
-	uint8_t buf[4 + 1 + 8 + 4 + 4 + 1 + 4 + 4 + 4 + 2 + 64 * 4 + 2 + 4096];
+	uint8_t buf[kMaxVoicePacket];
 	uint8_t* p = buf;
 	memcpy(p, "CVT1", 4);
 	p += 4;
@@ -407,7 +487,7 @@ static void ForwardVoice(int recipient, const google::protobuf::Message& msg, co
 	memcpy(p, data.data(), data.size());
 	p += data.size();
 
-	SendToRelay(buf, (size_t)(p - buf));
+	QueueToRelay(buf, (size_t)(p - buf));
 }
 
 // ---------------------------------------------------------------------------- silent voice for listeners
@@ -646,7 +726,7 @@ const char *CS2VoiceRelayTap::GetLicense()
 
 const char *CS2VoiceRelayTap::GetVersion()
 {
-	return "2.2.0";
+	return "2.3.1";
 }
 
 const char *CS2VoiceRelayTap::GetDate()
