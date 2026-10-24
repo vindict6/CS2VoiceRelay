@@ -43,9 +43,15 @@ the server would normally let them hear**, and it keeps working across every map
    | `ShowSpeakerHud` | `true` | Show "who is talking" as a HUD line |
    | `SessionTimeoutSeconds` | `10` | Drop a voice client after this long without traffic |
    | `MaxPacketsPerSecond` | `80` | Per-client rate limit (normal speech is 50/s) |
+   | `ForgetAfterSeconds` | `300` | Keep a player's token and voice session this long after they leave the server |
 
-Players get a one-time token in chat when they join (`!voice` shows it again). The token is
-tied to their SteamID, so nobody can transmit as someone else.
+Players get a token in chat when they join (`!voice` shows it again). The token is tied to
+their SteamID, so nobody can transmit as someone else.
+
+The voice client stays connected through map changes and quick rejoins: the token stays the
+same, and the relay keeps the player's session until they've been off the server for
+`ForgetAfterSeconds`. While the next map loads, players who haven't loaded in yet aren't routed
+any audio; nobody has to reconnect the voice client.
 
 ## Install (players)
 

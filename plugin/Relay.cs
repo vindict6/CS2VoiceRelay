@@ -33,6 +33,8 @@ public sealed class RelaySettings
     public bool RequireMatchingIp;
     public int SessionTimeoutSeconds = 10;
     public int MaxPacketsPerSecond = 80;
+    /// <summary>Forget a player's token and voice session once they've been off the server this long.</summary>
+    public int ForgetAfterSeconds = 300;
 }
 
 /// <summary>
@@ -58,6 +60,7 @@ public sealed class UdpRelay : IDisposable
     private readonly ConcurrentDictionary<IPEndPoint, Session> _sessions = new();
     private readonly ConcurrentDictionary<ulong, string> _tokens = new();
     private readonly ConcurrentDictionary<ulong, DateTime> _lastAudio = new();
+    private readonly ConcurrentDictionary<ulong, DateTime> _lastInGame = new();
     private volatile Dictionary<ulong, PlayerInfo> _players = new();
     private volatile Dictionary<ulong, IPAddress> _gameAddresses = new();
     private volatile VoiceRules _rules = VoiceRules.Default;
@@ -78,25 +81,45 @@ public sealed class UdpRelay : IDisposable
 
     // ---- called from the game thread ----
 
+    /// <summary>
+    /// Publishes the game state. Players are forgotten only after being absent for
+    /// ForgetAfterSeconds, never on a disconnect event: CounterStrikeSharp reports a
+    /// disconnect for everyone at every map change, and the voice client must survive that.
+    /// </summary>
     public void UpdateSnapshot(Dictionary<ulong, PlayerInfo> players, Dictionary<ulong, IPAddress> addresses, VoiceRules rules)
     {
         _players = players;
         _gameAddresses = addresses;
         _rules = rules;
+
+        var now = DateTime.UtcNow;
+        foreach (var id in players.Keys)
+            _lastInGame[id] = now;
+
+        var cutoff = now - TimeSpan.FromSeconds(_settings.ForgetAfterSeconds);
+        foreach (var kv in _lastInGame)
+        {
+            if (kv.Value < cutoff && !players.ContainsKey(kv.Key))
+            {
+                _lastInGame.TryRemove(kv.Key, out _);
+                Forget(kv.Key);
+            }
+        }
     }
 
-    public string IssueToken(ulong steamId)
+    /// <summary>Returns the player's existing token, or issues one. Tokens are stable across map changes.</summary>
+    public string GetOrIssueToken(ulong steamId)
     {
-        const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-        var chars = new char[Protocol.TokenLength];
-        for (var i = 0; i < chars.Length; i++)
-            chars[i] = alphabet[Random.Shared.Next(alphabet.Length)];
-        var token = new string(chars);
-        _tokens[steamId] = token;
-        return token;
+        _lastInGame.TryAdd(steamId, DateTime.UtcNow);
+        return _tokens.GetOrAdd(steamId, _ =>
+        {
+            const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+            var chars = new char[Protocol.TokenLength];
+            for (var i = 0; i < chars.Length; i++)
+                chars[i] = alphabet[Random.Shared.Next(alphabet.Length)];
+            return new string(chars);
+        });
     }
-
-    public string? GetToken(ulong steamId) => _tokens.TryGetValue(steamId, out var t) ? t : null;
 
     public bool IsLinked(ulong steamId)
     {

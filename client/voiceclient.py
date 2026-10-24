@@ -31,7 +31,7 @@ import sounddevice as sd
 from pynput import keyboard, mouse
 
 APP_NAME = "CS2VoiceRelay"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 MAGIC = b"CVR1"
 T_HELLO, T_AUDIO, T_PING, T_PONG, T_BYE, T_WELCOME, T_SPEAK, T_STATE = 1, 2, 3, 4, 5, 6, 7, 8
@@ -347,8 +347,8 @@ class VoiceClient:
             elif status == 1:
                 self.log("Relay rejected the token. Type !voice in game for a fresh one.")
                 self.stop.set()
-            else:
-                self.log("You're not on the game server yet; waiting...")
+            elif not self.linked:
+                self.log("You're not on the game server yet (or it's changing map); waiting...")
         elif kind == T_PONG:
             self.last_pong = time.monotonic()
         elif kind == T_SPEAK:

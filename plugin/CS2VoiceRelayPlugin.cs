@@ -21,6 +21,8 @@ public class RelayConfig : BasePluginConfig
     [JsonPropertyName("ShowSpeakerHud")] public bool ShowSpeakerHud { get; set; } = true;
     [JsonPropertyName("SessionTimeoutSeconds")] public int SessionTimeoutSeconds { get; set; } = 10;
     [JsonPropertyName("MaxPacketsPerSecond")] public int MaxPacketsPerSecond { get; set; } = 80;
+    /// <summary>Keep a player's token and voice session this long after they leave (covers map changes and quick rejoins).</summary>
+    [JsonPropertyName("ForgetAfterSeconds")] public int ForgetAfterSeconds { get; set; } = 300;
     [JsonPropertyName("ChatPrefix")] public string ChatPrefix { get; set; } = " \u0004[Voice]\u0001";
 }
 
@@ -33,7 +35,7 @@ public class RelayConfig : BasePluginConfig
 public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 {
     public override string ModuleName => "CS2VoiceRelay";
-    public override string ModuleVersion => "1.0.1";
+    public override string ModuleVersion => "1.0.2";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Out-of-game voice relay that survives workshop map changes";
 
@@ -53,6 +55,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
             throw new Exception($"BindAddress '{config.BindAddress}' is not an IP address");
         config.SessionTimeoutSeconds = Math.Max(3, config.SessionTimeoutSeconds);
         config.MaxPacketsPerSecond = Math.Max(10, config.MaxPacketsPerSecond);
+        config.ForgetAfterSeconds = Math.Max(60, config.ForgetAfterSeconds);
         Config = config;
     }
 
@@ -63,6 +66,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
             RequireMatchingIp = Config.RequireMatchingIp,
             SessionTimeoutSeconds = Config.SessionTimeoutSeconds,
             MaxPacketsPerSecond = Config.MaxPacketsPerSecond,
+            ForgetAfterSeconds = Config.ForgetAfterSeconds,
         };
         _relay = new UdpRelay(Config.BindAddress, Config.Port, settings, Logger);
         _relay.Start();
@@ -71,30 +75,29 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         AddTimer(0.5f, UpdateSpeakerHud, TimerFlags.REPEAT);
         AddTimer(1.0f, BroadcastState, TimerFlags.REPEAT);
 
+        // OnClientAuthorized fires again after every map change, and OnClientDisconnect is reported
+        // for everyone at map end, so neither is used to drop relay state. Tokens stay stable and
+        // the relay forgets players only after ForgetAfterSeconds off the server.
         RegisterListener<Listeners.OnClientAuthorized>((slot, steamId) =>
         {
-            var token = _relay.IssueToken(steamId.SteamId64);
+            var id = steamId.SteamId64;
+            var token = _relay.GetOrIssueToken(id);
             // Chat isn't visible yet while the player is still loading in.
             AddTimer(8f, () =>
             {
                 var player = Utilities.GetPlayerFromSlot(slot);
-                if (player is { IsValid: true, IsBot: false } && player.SteamID == steamId.SteamId64)
+                if (_relay == null || player is not { IsValid: true, IsBot: false } || player.SteamID != id)
+                    return;
+                if (!_relay.IsLinked(id))
                     SendConnectHint(player, token);
             });
-        });
-
-        RegisterListener<Listeners.OnClientDisconnect>(slot =>
-        {
-            var player = Utilities.GetPlayerFromSlot(slot);
-            if (player is { IsValid: true } && player.SteamID != 0)
-                _relay.Forget(player.SteamID);
         });
 
         if (hotReload)
         {
             foreach (var player in Utilities.GetPlayers())
                 if (player is { IsValid: true, IsBot: false } && player.SteamID != 0)
-                    SendConnectHint(player, _relay.IssueToken(player.SteamID));
+                    SendConnectHint(player, _relay.GetOrIssueToken(player.SteamID));
         }
     }
 
@@ -111,7 +114,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         if (player is not { IsValid: true } || _relay == null || player.SteamID == 0)
             return;
 
-        var token = _relay.GetToken(player.SteamID) ?? _relay.IssueToken(player.SteamID);
+        var token = _relay.GetOrIssueToken(player.SteamID);
         SendConnectHint(player, token);
         var linked = _relay.IsLinked(player.SteamID);
         player.PrintToChat($"{Config.ChatPrefix} Status: {(linked ? "\u0004linked" : "\u0002not linked")}\u0001, {_relay.LinkedCount} player(s) on the relay.");
