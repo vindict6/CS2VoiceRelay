@@ -2,6 +2,10 @@
 
 Hear in-game voice in your browser when CS2 stops playing it. Comes with a live scoreboard.
 
+> If you like this and it's useful on your server, please consider supporting it:
+> [buymeacoffee.com/theboneman](https://buymeacoffee.com/theboneman). It keeps me building and
+> fixing stuff like this. Thank you!
+
 ![The CS2VoiceRelay page: voice controls on top, the live scoreboard below](docs/page.png)
 
 ## Why I made this
@@ -31,10 +35,14 @@ next to the game.
   to any browser.
 - A live scoreboard with the same stats and layout as my
   [CompStats](https://github.com/vindict6/CompStats) readout: K/D/A, HS%, damage, utility damage,
-  enemies flashed, KDR, ADR, Zeus kills, MVPs, score, money and ping. It's read straight from the
-  game, no console commands, so it doesn't step on ServerStats or CompStats if you run those.
+  enemies flashed, KDR, ADR, Zeus kills, MVPs, score, money and ping, with CT and T in their own
+  sections, sorted by score. It's read straight from the game, no console commands, so it doesn't
+  step on ServerStats or CompStats if you run those.
 - No install for players, no microphone permission, works on phones.
-- The page title, description and footer are yours to set in the config.
+- Your branding: logo, accent and team colors, page title, description and footer, all in the
+  config.
+- Put the player on your own website with one script tag, or a few lines of PHP. See
+  [Embedding](https://github.com/vindict6/CS2VoiceRelay/wiki/Embedding) on the wiki.
 - Tournament mode for casters and admins: spectators hear every player, with a button to solo
   CT or T. Players on a team still only hear their own team.
 
@@ -108,6 +116,8 @@ Here's a filled-in example:
 //   "ChatPrefix": " {green}[Voice]{default}"   (start with a space so the first color shows)
 // JoinMessageDelaySeconds: wait after a player joins. ReminderIntervalMinutes: repeat to everyone not listening (0 = off).
 // PageTitle, PageDescription, PageFooter: the web page's text. Plain text; links (https://...) become clickable.
+// Logo: image URL (https://...) or a file next to this config, e.g. "logo.png" (png, jpg, gif, webp, svg, ico).
+// AccentColor, CtColor, TColor: hex colors like "#e8a33a" for buttons and links, and the two teams.
 // TlsCertificate, TlsPrivateKey: PEM files (e.g. Let's Encrypt fullchain.pem, privkey.pem) to serve HTTPS on Port too.
 // TournamentMode: spectators listening in a browser (and SteamID64s in TournamentListeners) hear every player,
 //   with buttons to solo CT or T. Players on a team still only hear their own team.
@@ -121,7 +131,12 @@ Here's a filled-in example:
   "PageTitle": "Fragtown Voice",
   "PageDescription": "Hear our servers' voice chat here. Keep talking in game as normal. Questions? https://example.com/discord",
   "PageFooter": "Keep this tab open while you play.",
+  "Logo": "logo.png",
+  "AccentColor": "#3a8ee8",
+  "CtColor": "#5fa8ff",
+  "TColor": "#f0b050",
   "ShowScoreboard": true,
+  "ShowZeusLeader": false,
   "TournamentMode": false,
   "TournamentListeners": [],
   "TapPort": 27031,
@@ -153,7 +168,11 @@ minutes for as long as they're not listening:
 | `PageTitle` | `CS2VoiceRelay` | Heading and tab title of the page |
 | `PageDescription` | short intro | Line under the heading. URLs turn into links |
 | `PageFooter` | short tip | Footer text. URLs turn into links |
+| `Logo` | `""` | Your logo, shown in the page header, as the tab icon and in the embed widget. An image URL, or a file on the server: an absolute path, or a name relative to this config's folder like `logo.png`. png, jpg, gif, webp, svg or ico, up to 2 MB |
+| `AccentColor` | `#e8a33a` | Buttons, sliders, links and the page's glow. Button text switches between dark and light to stay readable |
+| `CtColor`, `TColor` | `#7fb2e5`, `#e6b25f` | Team colors on the scoreboard |
 | `ShowScoreboard` | `true` | Show the live scoreboard. Anyone who opens the page sees it, linked or not |
+| `ShowZeusLeader` | `false` | Show the "Zeus Leader" line under the scoreboard |
 | `TournamentMode` | `false` | Spectators listening in a browser hear every player, with buttons to solo one team. See [Tournament mode](#tournament-mode) |
 | `TournamentListeners` | `[]` | SteamID64s that hear every player in tournament mode even while on a team, like `["76561198000000000"]`. Only put people here who aren't playing |
 | `TapPort` | `27031` | Localhost UDP port between the Metamod tap and the plugin. The tap reads it from this file too and follows changes within 5 seconds; reload the plugin after changing it |
@@ -230,29 +249,30 @@ If Apache runs in Docker, use `host.docker.internal` (with `extra_hosts:
 `"TrustedProxies": ["172.16.0.0/12"]`. Then the plugin's port doesn't need to be open to the
 internet at all.
 
+## Branding
+
+Set `Logo`, `AccentColor`, `CtColor` and `TColor` and the page is yours:
+
+![The page with a custom logo and a blue accent](docs/branded-page.png)
+
 ## Putting the player in your own site
 
-All the audio, linking and settings live in [`voice-engine.js`](plugin/web/voice-engine.js),
-which has no UI, so you can build the player into your own pages. That's how I run it on
+The plugin serves a ready-made widget, so embedding the player is one script tag:
+
+```html
+<div id="cs2voice"></div>
+<script src="http://your-server:27030/widget.js" data-title="Server voice"></script>
+```
+
+<p align="center">
+  <img src="docs/widget.png" alt="The embed widget" width="380">
+</p>
+
+The [Embedding](https://github.com/vindict6/CS2VoiceRelay/wiki/Embedding) wiki page has the widget's options, a PHP helper, what to do if your
+site uses HTTPS, and how to build your own player on `voice-engine.js`. That's how I run it on
 [OnlyZaps.gg](https://onlyzaps.gg), where it sits above the site's own live scoreboard:
 
 ![The voice pane on the OnlyZaps.gg homepage](docs/embed-onlyzaps.png)
-
-Proxy `/voice/ws`, `/voice/voice-engine.js` and `/voice/opus-decoder.min.js` to the plugin, load
-the two scripts, and create an engine:
-
-```js
-const vr = CS2VoiceRelay.createEngine({ wsUrl: "/voice/ws" });
-vr.on("status", (s) => { /* s.phase: connecting | waiting | choose | linked | reconnecting */ });
-vr.on("state", (st) => { /* st.players: [{ id, name, team, alive }], st.board: the scoreboard */ });
-button.onclick = () => vr.start();          // browsers need a click before audio
-vr.setPlayer(steamId, { vol: 50 });         // saved on the server for this listener
-vr.isSpeaking(steamId);
-```
-
-The full API is at the top of `voice-engine.js`. The bundled page
-([`plugin/web/index.html`](plugin/web/index.html) with [`app.js`](plugin/web/app.js)) is built
-the same way.
 
 ## Things to know
 

@@ -4,22 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{PAGE_TITLE}}</title>
+{{FAVICON}}
 <style>
   :root {
     --bg: #0f1216; --panel: #181c22; --panel2: #1f242c; --line: #2a3039;
     --fg: #e8eaed; --dim: #9aa3ad; --accent: #e8a33a; --accent2: #f4bb5c;
-    --ok: #63c46b; --warn: #e0b341; --bad: #e0625b; --ct: #7fb2e5; --t: #e6b25f;
+    --ok: #63c46b; --warn: #e0b341; --bad: #e0625b; --ct: #7fb2e5; --t: #e6b25f; --on-accent: #1b1405;
     --mono: ui-monospace, "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--fg);
     font: 15px/1.45 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
-  body { min-height: 100vh; background: radial-gradient(1200px 500px at 50% -200px, #2a2114 0%, var(--bg) 70%); }
+  body { min-height: 100vh; background: radial-gradient(1200px 500px at 50% -200px, color-mix(in srgb, var(--accent) 16%, var(--bg)) 0%, var(--bg) 70%); }
   a { color: var(--accent2); }
   main { max-width: 1180px; margin: 0 auto; padding: 28px 16px 40px; }
   header { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
-  .logo { flex: none; width: 42px; height: 42px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), #b9741c);
-    display: grid; place-items: center; font-weight: 800; color: #1b1405; font-size: 18px; letter-spacing: -1px; }
+  .logo { flex: none; width: 42px; height: 42px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 72%, black));
+    display: grid; place-items: center; font-weight: 800; color: var(--on-accent); font-size: 18px; letter-spacing: -1px; }
+  .logo-img { flex: none; width: 42px; height: 42px; border-radius: 10px; object-fit: contain; }
   h1 { font-size: 24px; margin: 0; letter-spacing: .2px; min-width: 0; overflow-wrap: anywhere; }
   .sub { color: var(--dim); font-size: 14px; margin: 0 0 20px 56px; }
   .pill { margin-left: auto; font-size: 13px; padding: 5px 11px; border-radius: 999px; background: var(--panel2);
@@ -32,7 +35,7 @@
   button { font: inherit; border-radius: 10px; padding: 10px 16px; cursor: pointer; color: var(--fg);
     background: var(--panel2); border: 1px solid var(--line); }
   button:hover { border-color: #3a424e; }
-  button.primary { background: var(--accent); color: #1b1405; border-color: transparent; font-weight: 700; }
+  button.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 700; }
   button.primary:hover { background: var(--accent2); }
   button.on { background: #3a2a2a; border-color: #5a3434; color: #ffb4ad; }
   input[type=range] { -webkit-appearance: none; appearance: none; background: transparent; width: 100%; height: 26px; }
@@ -58,7 +61,7 @@
   .solo .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   .solo .seg button { border: 0; border-radius: 0; padding: 7px 16px; background: var(--panel2); }
   .solo .seg button + button { border-left: 1px solid var(--line); }
-  .solo .seg button[aria-pressed="true"] { background: var(--accent); color: #1b1405; font-weight: 700; }
+  .solo .seg button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); font-weight: 700; }
   .solo .seg button[data-team="3"][aria-pressed="true"] { background: var(--ct); }
   .solo .seg button[data-team="2"][aria-pressed="true"] { background: var(--t); }
   .notice { padding: 12px 14px; border-radius: 10px; background: #221d12; border: 1px solid #4a3b18; color: #f1d595; margin-bottom: 14px; }
@@ -99,6 +102,11 @@
   .vctl .value { font-size: 12px; color: var(--dim); }
   .vctl button { padding: 3px 8px; font-size: 12px; border-radius: 8px; }
   .board .empty td { text-align: center; color: var(--dim); padding: 18px; }
+  .board tr.team-head td { text-align: left; padding-top: 14px; font-weight: 700; letter-spacing: .5px;
+    border-bottom: 1px solid var(--line); font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px; text-transform: uppercase; }
+  .board tr.team-head:first-child td { padding-top: 6px; }
+  .board tr.team-head .wins { float: right; font-family: var(--mono); text-transform: none; }
+  .board tr.head-3 td { color: var(--ct); } .board tr.head-2 td { color: var(--t); } .board tr.head-1 td { color: var(--dim); }
 
   footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 22px; }
   .hidden { display: none !important; }
@@ -108,11 +116,12 @@
     .board .player-cell { max-width: 150px; }
   }
 </style>
+{{THEME}}
 </head>
 <body>
 <main>
   <header>
-    <div class="logo">VR</div>
+    {{LOGO}}
     <h1>{{PAGE_TITLE}}</h1>
     <span id="conn" class="pill">Connecting</span>
   </header>

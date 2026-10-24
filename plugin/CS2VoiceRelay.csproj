@@ -22,5 +22,6 @@
     <EmbeddedResource Include="web\app.js" />
     <EmbeddedResource Include="web\voice-engine.js" />
     <EmbeddedResource Include="web\opus-decoder.min.js" />
+    <EmbeddedResource Include="web\widget.js" />
   </ItemGroup>
 </Project>

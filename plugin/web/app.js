@@ -92,7 +92,6 @@
   // ------------------------------------------------------------------ scoreboard
 
   const TEAM = { 2: "T", 3: "CT", 1: "SPEC" };
-  const TEAM_ORDER = { 3: 0, 2: 1, 1: 2 };
 
   vr.on("state", (st) => {
     $("host").textContent = st.host || "CS2 server";
@@ -135,9 +134,9 @@
     bold[1].textContent = board.tWins;
     bold[2].textContent = board.ctWins;
 
-    // "--- Zeus Leader: Name (n Kills) ---", humans only, shown once someone has one
+    // "--- Zeus Leader: Name (n Kills) ---", humans only, when the server turns it on
     let leader = null;
-    for (const r of board.rows) if (!r.bot && r.z > 0 && (!leader || r.z > leader.z)) leader = r;
+    if (board.zeusLeader) for (const r of board.rows) if (!r.bot && r.z > 0 && (!leader || r.z > leader.z)) leader = r;
     const zeus = $("zeus-line");
     zeus.classList.toggle("hidden", !leader);
     if (leader) {
@@ -151,15 +150,46 @@
     if (!board) return;
     renderLines(board);
 
-    const rows = [...board.rows].sort((a, b) =>
-      (TEAM_ORDER[a.team] ?? 3) - (TEAM_ORDER[b.team] ?? 3) || b.score - a.score || b.k - a.k ||
-      a.name.localeCompare(b.name));
+    // CT, then T, then spectators, each under its own heading and sorted by score
+    const byScore = (a, b) => b.score - a.score || b.k - a.k || a.d - b.d || a.name.localeCompare(b.name);
+    const groups = [
+      { team: 3, title: "Counter-Terrorists", wins: board.ctWins, rows: board.rows.filter((r) => r.team === 3) },
+      { team: 2, title: "Terrorists", wins: board.tWins, rows: board.rows.filter((r) => r.team === 2) },
+      { team: 1, title: "Spectators", rows: board.rows.filter((r) => r.team !== 2 && r.team !== 3) },
+    ].filter((g) => g.rows.length);
     const body = $("board-rows");
     const existing = new Map([...body.children].map((el) => [el.dataset.key, el]));
     const rounds = Math.max(board.round || 1, 1);
     let index = 0;
+    const rows = [];
 
-    for (const p of rows) {
+    const place = (row) => {
+      if (body.children[index] !== row) body.insertBefore(row, body.children[index] || null);
+      index++;
+    };
+
+    for (const g of groups) {
+      const key = "head:" + g.team;
+      let head = existing.get(key);
+      if (!head) {
+        head = document.createElement("tr");
+        head.dataset.key = key;
+        const td = document.createElement("td");
+        td.colSpan = 19;
+        head.appendChild(td);
+      }
+      existing.delete(key);
+      head.className = "team-head head-" + g.team;
+      const wins = g.wins === undefined ? null : span("wins", g.wins + (g.wins === 1 ? " win" : " wins"));
+      head.cells[0].replaceChildren(g.title + " (" + g.rows.length + ")", ...(wins ? [wins] : []));
+      place(head);
+      for (const r of [...g.rows].sort(byScore)) {
+        rows.push(r);
+        renderRow(r);
+      }
+    }
+
+    function renderRow(p) {
       const key = p.id || "bot:" + p.slot + ":" + p.name;
       let row = existing.get(key);
       if (!row) row = createRow(key, p.id);
@@ -190,9 +220,7 @@
 
       const ctl = row.querySelector(".vctl");
       if (ctl) ctl.classList.toggle("hidden", p.id === me);
-
-      if (body.children[index] !== row) body.insertBefore(row, body.children[index] || null);
-      index++;
+      place(row);
     }
     for (const el of existing.values()) el.remove();
 

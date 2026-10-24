@@ -31,8 +31,19 @@ public class RelayConfig : BasePluginConfig
     [JsonPropertyName("PageTitle")] public string PageTitle { get; set; } = "CS2VoiceRelay";
     [JsonPropertyName("PageDescription")] public string PageDescription { get; set; } = "Hear in-game voice here when CS2 stops playing it. Keep talking in game as normal.";
     [JsonPropertyName("PageFooter")] public string PageFooter { get; set; } = "Keep this tab open while you play. While it's listening, you'll still see who's talking in CS2, but the audio only plays here, so you never hear it twice.";
+    /// <summary>
+    /// Branding. Logo: an image URL (https://...) or a file on the server (absolute, or relative to this
+    /// config's folder): png, jpg, gif, webp, svg or ico. Shown in the page header, as the tab icon and
+    /// in the widget. Colors are hex, like "#e8a33a".
+    /// </summary>
+    [JsonPropertyName("Logo")] public string Logo { get; set; } = "";
+    [JsonPropertyName("AccentColor")] public string AccentColor { get; set; } = "#e8a33a";
+    [JsonPropertyName("CtColor")] public string CtColor { get; set; } = "#7fb2e5";
+    [JsonPropertyName("TColor")] public string TColor { get; set; } = "#e6b25f";
     /// <summary>Show the live scoreboard (CompStats layout) on the page, to everyone who opens it.</summary>
     [JsonPropertyName("ShowScoreboard")] public bool ShowScoreboard { get; set; } = true;
+    /// <summary>Show CompStats' "Zeus Leader" line under the scoreboard.</summary>
+    [JsonPropertyName("ShowZeusLeader")] public bool ShowZeusLeader { get; set; } = false;
 
     /// <summary>
     /// Tournament mode: browser listeners who are spectators on the server, or whose SteamID64 is
@@ -88,7 +99,7 @@ public class RelayConfig : BasePluginConfig
 public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 {
     public override string ModuleName => "CS2VoiceRelay";
-    public override string ModuleVersion => "2.3.1";
+    public override string ModuleVersion => "2.4.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Hear in-game voice in your browser when CS2's voice playback breaks";
 
@@ -125,8 +136,26 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         foreach (var entry in config.TrustedProxies)
             if (!TryParseNetwork(entry, out _))
                 throw new Exception($"TrustedProxies entry '{entry}' is not an IP address or CIDR range");
+        config.AccentColor = CheckColor("AccentColor", config.AccentColor, "#e8a33a");
+        config.CtColor = CheckColor("CtColor", config.CtColor, "#7fb2e5");
+        config.TColor = CheckColor("TColor", config.TColor, "#e6b25f");
         Config = config;
         AddConfigNotes();
+    }
+
+    private string ConfigFilePath() =>
+        Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", "CS2VoiceRelay", "CS2VoiceRelay.json"));
+
+    private static readonly System.Text.RegularExpressions.Regex HexColor = new("^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$");
+
+    /// <summary>A typo in a color shouldn't stop voice from working: warn and use the default.</summary>
+    private string CheckColor(string key, string value, string fallback)
+    {
+        value = (value ?? "").Trim();
+        if (HexColor.IsMatch(value))
+            return value;
+        Logger.LogWarning("{Key} '{Value}' isn't a hex color like #e8a33a; using {Default}", key, value, fallback);
+        return fallback;
     }
 
     private const string ConfigNotesMarker = "// ---- CS2VoiceRelay notes";
@@ -140,7 +169,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
     {
         try
         {
-            var path = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", "CS2VoiceRelay", "CS2VoiceRelay.json"));
+            var path = ConfigFilePath();
             if (!File.Exists(path))
                 return;
             var text = File.ReadAllText(path);
@@ -165,6 +194,8 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
                 "//   \"ChatPrefix\": \" {green}[Voice]{default}\"   (start with a space so the first color shows)",
                 "// JoinMessageDelaySeconds: wait after a player joins. ReminderIntervalMinutes: repeat to everyone not listening (0 = off).",
                 "// PageTitle, PageDescription, PageFooter: the web page's text. Plain text; links (https://...) become clickable.",
+                "// Logo: image URL (https://...) or a file next to this config, e.g. \"logo.png\" (png, jpg, gif, webp, svg, ico).",
+                "// AccentColor, CtColor, TColor: hex colors like \"#e8a33a\" for buttons and links, and the two teams.",
                 "// TlsCertificate, TlsPrivateKey: PEM files (e.g. Let's Encrypt fullchain.pem, privkey.pem) to serve HTTPS on Port too.",
                 "// TournamentMode: spectators listening in a browser (and SteamID64s in TournamentListeners) hear every player,",
                 "//   with buttons to solo CT or T. Players on a team still only hear their own team.",
@@ -219,6 +250,12 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
                 PageDescription = Config.PageDescription,
                 PageFooter = Config.PageFooter,
                 ShowScoreboard = Config.ShowScoreboard,
+                ShowZeusLeader = Config.ShowZeusLeader,
+                Logo = Config.Logo.Trim(),
+                LogoBaseDir = Path.GetDirectoryName(ConfigFilePath()) ?? "",
+                AccentColor = Config.AccentColor,
+                CtColor = Config.CtColor,
+                TColor = Config.TColor,
                 TournamentMode = Config.TournamentMode,
                 TournamentListeners = Config.TournamentListeners.Select(e => ulong.Parse(e.Trim())).ToHashSet(),
             },

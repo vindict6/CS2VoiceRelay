@@ -43,6 +43,13 @@ public sealed class WebSettings
     public string PageDescription = "";
     public string PageFooter = "";
     public bool ShowScoreboard = true;
+    public bool ShowZeusLeader;
+    /// <summary>Image URL, or a file path (relative to LogoBaseDir) the server serves as /logo.ext.</summary>
+    public string Logo = "";
+    public string LogoBaseDir = "";
+    public string AccentColor = "#e8a33a";
+    public string CtColor = "#7fb2e5";
+    public string TColor = "#e6b25f";
     /// <summary>Spectators (and TournamentListeners) hear every player instead of their own routing.</summary>
     public bool TournamentMode;
     public HashSet<ulong> TournamentListeners = new();
@@ -128,7 +135,9 @@ public sealed class WebServer : IDisposable
         _log = log;
         _listener = new TcpListener(IPAddress.Parse(settings.BindAddress), settings.Port);
 
+        _logoUrl = LoadLogo();
         LoadFile("/", "index.html", "text/html; charset=utf-8", FillPage);
+        LoadFile("/widget.js", "widget.js", "text/javascript; charset=utf-8", FillWidget);
         LoadFile("/app.js", "app.js", "text/javascript; charset=utf-8");
         LoadFile("/voice-engine.js", "voice-engine.js", "text/javascript; charset=utf-8");
         LoadFile("/opus-decoder.min.js", "opus-decoder.min.js", "text/javascript; charset=utf-8");
@@ -147,8 +156,89 @@ public sealed class WebServer : IDisposable
         _files[path] = (body, type);
     }
 
-    /// <summary>The page's heading, description and footer come from the plugin config.</summary>
+    private static readonly Dictionary<string, string> ImageTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [".png"] = "image/png", [".jpg"] = "image/jpeg", [".jpeg"] = "image/jpeg", [".gif"] = "image/gif",
+        [".webp"] = "image/webp", [".svg"] = "image/svg+xml", [".ico"] = "image/x-icon",
+    };
+
+    /// <summary>
+    /// The logo as the page should reference it: an http(s) URL as is, or a server file loaded into
+    /// memory and served as "logo.ext" next to the page. Empty when there's none or it can't be used.
+    /// </summary>
+    private string LoadLogo()
+    {
+        var logo = _settings.Logo;
+        if (logo.Length == 0)
+            return "";
+        if (Uri.TryCreate(logo, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp))
+            return uri.AbsoluteUri;
+        try
+        {
+            var path = Path.IsPathRooted(logo) ? logo : Path.Combine(_settings.LogoBaseDir, logo);
+            var ext = Path.GetExtension(path);
+            if (!ImageTypes.TryGetValue(ext, out var type))
+            {
+                _log.LogWarning("Logo '{Logo}' isn't a png, jpg, gif, webp, svg or ico file; not showing a logo", logo);
+                return "";
+            }
+            var bytes = File.ReadAllBytes(path);
+            if (bytes.Length > 2 * 1024 * 1024)
+            {
+                _log.LogWarning("Logo '{Logo}' is over 2 MB; not showing a logo", logo);
+                return "";
+            }
+            var name = "/logo" + ext.ToLowerInvariant();
+            _files[name] = (bytes, type);
+            return name[1..];
+        }
+        catch (Exception e)
+        {
+            _log.LogWarning("Can't read logo '{Logo}': {Error}", logo, e.Message);
+            return "";
+        }
+    }
+
+    private readonly string _logoUrl;
+
+    private static string TextOn(string hex)
+    {
+        var h = hex.TrimStart('#');
+        if (h.Length == 3)
+            h = string.Concat(h.Select(c => $"{c}{c}"));
+        double Channel(int i)
+        {
+            var c = Convert.ToInt32(h.Substring(i, 2), 16) / 255.0;
+            return c <= 0.03928 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
+        }
+        var luminance = 0.2126 * Channel(0) + 0.7152 * Channel(2) + 0.0722 * Channel(4);
+        return luminance > 0.3 ? "#14110a" : "#ffffff";
+    }
+
+    private string ThemeCss() =>
+        $"<style>:root {{ --accent: {_settings.AccentColor}; --accent2: color-mix(in srgb, {_settings.AccentColor} 78%, white); " +
+        $"--on-accent: {TextOn(_settings.AccentColor)}; --ct: {_settings.CtColor}; --t: {_settings.TColor}; }}</style>";
+
+    private string LogoHtml()
+    {
+        if (_logoUrl.Length == 0)
+            return "<div class=\"logo\" aria-hidden=\"true\">VR</div>";
+        return $"<img class=\"logo-img\" src=\"{WebUtility.HtmlEncode(_logoUrl)}\" alt=\"\">";
+    }
+
+    private string FaviconHtml() =>
+        _logoUrl.Length == 0 ? "" : $"<link rel=\"icon\" href=\"{WebUtility.HtmlEncode(_logoUrl)}\">";
+
+    /// <summary>The widget gets the configured accent and logo as its defaults.</summary>
+    private string FillWidget(string js) => js
+        .Replace("{{ACCENT}}", _settings.AccentColor)
+        .Replace("{{LOGO}}", _logoUrl.Replace("\\", "").Replace("\"", "%22"));
+
+    /// <summary>The page's heading, description, footer, logo and colors come from the plugin config.</summary>
     private string FillPage(string html) => html
+        .Replace("{{THEME}}", ThemeCss())
+        .Replace("{{FAVICON}}", FaviconHtml())
+        .Replace("{{LOGO}}", LogoHtml())
         .Replace("{{PAGE_TITLE}}", WebUtility.HtmlEncode(_settings.PageTitle))
         .Replace("{{PAGE_DESCRIPTION}}", Linkify(_settings.PageDescription))
         .Replace("{{PAGE_FOOTER}}", Linkify(_settings.PageFooter));
@@ -289,6 +379,7 @@ public sealed class WebServer : IDisposable
             tWins = b.TWins,
             ctWins = b.CtWins,
             round = b.Round,
+            zeusLeader = _settings.ShowZeusLeader,
             rows = b.Rows.Select(r => new
             {
                 slot = r.Slot, id = r.Id, name = r.Name, team = r.Team, bot = r.Bot,
@@ -634,6 +725,7 @@ public sealed class WebServer : IDisposable
         };
         var head = $"HTTP/1.1 {status} {reason}\r\nContent-Type: {type}\r\nContent-Length: {body.Length}\r\n{extraHeaders}" +
                    "Cache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n" +
+                   (type.StartsWith("image/", StringComparison.Ordinal) ? "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\n" : "") +
                    "Referrer-Policy: no-referrer\r\nConnection: close\r\n\r\n";
         await stream.WriteAsync(Encoding.ASCII.GetBytes(head));
         if (!headOnly)
