@@ -1,11 +1,14 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
@@ -22,6 +25,7 @@ public sealed class ServerSnapshot
     public Dictionary<ulong, PlayerInfo> BySteamId { get; init; } = new();
     public string Map { get; init; } = "";
     public string Hostname { get; init; } = "";
+    public ScoreBoard Board { get; init; } = ScoreBoard.Empty;
 }
 
 public sealed class WebSettings
@@ -32,6 +36,16 @@ public sealed class WebSettings
     public List<IPNetwork> TrustedProxies = new();
     public int MaxConnections = 256;
     public int MaxConnectionsPerIp = 6;
+    /// <summary>PEM paths. Both set: the port also speaks HTTPS and sends plain-HTTP visitors there.</summary>
+    public string TlsCertificate = "";
+    public string TlsPrivateKey = "";
+    public string PageTitle = "CS2VoiceRelay";
+    public string PageDescription = "";
+    public string PageFooter = "";
+    public bool ShowScoreboard = true;
+    /// <summary>Spectators (and TournamentListeners) hear every player instead of their own routing.</summary>
+    public bool TournamentMode;
+    public HashSet<ulong> TournamentListeners = new();
 }
 
 /// <summary>
@@ -75,6 +89,35 @@ public sealed class WebServer : IDisposable
     private int _nextId;
     private Task? _acceptLoop;
 
+    /// <summary>Listeners who hear everyone (tournament mode). Swapped by Tick, read by the tap thread.</summary>
+    private volatile HashSet<ulong> _allVoice = new();
+    private readonly Dictionary<ulong, RecentFrames> _recent = new();
+
+    /// <summary>The engine sends one speaker's packet to many players; remembers the last few to send it once.</summary>
+    private sealed class RecentFrames
+    {
+        private readonly byte[]?[] _frames = new byte[8][];
+        private readonly long[] _when = new long[8];
+        private int _next;
+
+        public bool SeenRecently(byte[] frame, long now)
+        {
+            for (var i = 0; i < _frames.Length; i++)
+                if (_frames[i] is { } f && now - _when[i] < 250 && f.AsSpan().SequenceEqual(frame))
+                    return true;
+            _frames[_next] = frame;
+            _when[_next] = now;
+            _next = (_next + 1) % _frames.Length;
+            return false;
+        }
+    }
+
+    private sealed record TlsCert(SslStreamCertificateContext Context, DateTime CertWritten, DateTime KeyWritten, DateTime NotAfter);
+    private readonly object _tlsLock = new();
+    private TlsCert? _tls;
+    private DateTime _tlsChecked = DateTime.MinValue;
+    private string? _tlsError;
+
     public WebServer(WebSettings settings, Func<ServerSnapshot> snapshot, Action<ulong, string> sendCodeToPlayer, PrefsStore prefs, string version, ILogger log)
     {
         _settings = settings;
@@ -85,24 +128,96 @@ public sealed class WebServer : IDisposable
         _log = log;
         _listener = new TcpListener(IPAddress.Parse(settings.BindAddress), settings.Port);
 
-        LoadFile("/", "index.html", "text/html; charset=utf-8");
+        LoadFile("/", "index.html", "text/html; charset=utf-8", FillPage);
         LoadFile("/app.js", "app.js", "text/javascript; charset=utf-8");
         LoadFile("/voice-engine.js", "voice-engine.js", "text/javascript; charset=utf-8");
         LoadFile("/opus-decoder.min.js", "opus-decoder.min.js", "text/javascript; charset=utf-8");
     }
 
-    private void LoadFile(string path, string resource, string type)
+    private void LoadFile(string path, string resource, string type, Func<string, string>? fill = null)
     {
         var asm = Assembly.GetExecutingAssembly();
         var name = asm.GetManifestResourceNames().First(n => n.EndsWith("." + resource, StringComparison.Ordinal));
         using var s = asm.GetManifestResourceStream(name)!;
         using var ms = new MemoryStream();
         s.CopyTo(ms);
-        _files[path] = (ms.ToArray(), type);
+        var body = ms.ToArray();
+        if (fill != null)
+            body = Encoding.UTF8.GetBytes(fill(Encoding.UTF8.GetString(body)));
+        _files[path] = (body, type);
+    }
+
+    /// <summary>The page's heading, description and footer come from the plugin config.</summary>
+    private string FillPage(string html) => html
+        .Replace("{{PAGE_TITLE}}", WebUtility.HtmlEncode(_settings.PageTitle))
+        .Replace("{{PAGE_DESCRIPTION}}", Linkify(_settings.PageDescription))
+        .Replace("{{PAGE_FOOTER}}", Linkify(_settings.PageFooter));
+
+    private static readonly Regex UrlPattern = new(@"https?://(?:[^\s<>&]|&amp;)+", RegexOptions.Compiled);
+
+    /// <summary>HTML-escapes plain text and turns http(s) URLs in it into links.</summary>
+    private static string Linkify(string text) =>
+        UrlPattern.Replace(WebUtility.HtmlEncode(text ?? ""), m =>
+        {
+            var url = m.Value.TrimEnd('.', ',', '!', '?', ')', ';', ':');
+            return $"<a href=\"{url}\" target=\"_blank\" rel=\"noopener\">{url}</a>{m.Value[url.Length..]}";
+        });
+
+    // ------------------------------------------------------------------ HTTPS on the same port
+
+    private bool TlsConfigured => _settings.TlsCertificate.Length > 0 && _settings.TlsPrivateKey.Length > 0;
+
+    /// <summary>
+    /// The certificate for HTTPS, re-read when either file changes (checked at most every 30 s), so
+    /// a renewal is picked up without a restart. A broken renewal keeps the last good certificate.
+    /// </summary>
+    private TlsCert? CurrentTls()
+    {
+        if (!TlsConfigured)
+            return null;
+        lock (_tlsLock)
+        {
+            if (DateTime.UtcNow - _tlsChecked < TimeSpan.FromSeconds(30))
+                return _tls;
+            _tlsChecked = DateTime.UtcNow;
+            try
+            {
+                var certWritten = File.GetLastWriteTimeUtc(_settings.TlsCertificate);
+                var keyWritten = File.GetLastWriteTimeUtc(_settings.TlsPrivateKey);
+                if (_tls != null && _tls.CertWritten == certWritten && _tls.KeyWritten == keyWritten)
+                    return _tls;
+
+                using var pem = X509Certificate2.CreateFromPemFile(_settings.TlsCertificate, _settings.TlsPrivateKey);
+                // A PKCS#12 round trip gives SslStream a key it can use on every OS
+                var leaf = X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pkcs12), null);
+                var chain = new X509Certificate2Collection();
+                chain.ImportFromPemFile(_settings.TlsCertificate);
+                var intermediates = new X509Certificate2Collection();
+                foreach (var c in chain)
+                    if (c.Thumbprint != leaf.Thumbprint)
+                        intermediates.Add(c);
+
+                _tls = new TlsCert(SslStreamCertificateContext.Create(leaf, intermediates, offline: true),
+                    certWritten, keyWritten, leaf.NotAfter.ToUniversalTime());
+                _tlsError = null;
+                _log.LogInformation("HTTPS enabled on port {Port}: {Subject}, valid until {NotAfter:yyyy-MM-dd}",
+                    _settings.Port, leaf.GetNameInfo(X509NameType.SimpleName, false), _tls.NotAfter);
+            }
+            catch (Exception e)
+            {
+                if (_tlsError != e.Message)
+                    _log.LogWarning("Can't load the HTTPS certificate ({Cert}, {Key}): {Error}. {Fallback}",
+                        _settings.TlsCertificate, _settings.TlsPrivateKey, e.Message,
+                        _tls != null ? "Keeping the previous certificate." : "Serving plain HTTP only.");
+                _tlsError = e.Message;
+            }
+            return _tls;
+        }
     }
 
     public void Start()
     {
+        CurrentTls();
         _listener.Start(64);
         _acceptLoop = Task.Run(AcceptLoop);
         _log.LogInformation("Web player listening on {EndPoint}", _listener.LocalEndpoint);
@@ -123,12 +238,34 @@ public sealed class WebServer : IDisposable
     /// <summary>Called from the tap thread for every voice packet the engine sent a player.</summary>
     public void RouteVoice(ulong recipientSteamId, byte[] frame)
     {
+        // Tournament listeners get everyone through RouteToAllVoice instead
+        if (_allVoice.Contains(recipientSteamId))
+            return;
         foreach (var s in _sessions.Values)
             if (s.Ready && s.SteamId == recipientSteamId)
                 s.Send(frame, WebSocketMessageType.Binary);
     }
 
-    /// <summary>Periodic: identify unbound browsers and push the roster.</summary>
+    /// <summary>
+    /// Tournament mode, tap thread: every voice packet the engine sends anyone, once per packet, to
+    /// listeners who hear everyone. A speaker the game sends to nobody (alone on a team, say) can't
+    /// be heard this way.
+    /// </summary>
+    public void RouteToAllVoice(ulong speaker, byte[] frame)
+    {
+        var allVoice = _allVoice;
+        if (allVoice.Count == 0)
+            return;
+        if (!_recent.TryGetValue(speaker, out var recent))
+            _recent[speaker] = recent = new RecentFrames();
+        if (recent.SeenRecently(frame, Environment.TickCount64))
+            return;
+        foreach (var s in _sessions.Values)
+            if (s.Ready && s.SteamId != 0 && s.SteamId != speaker && allVoice.Contains(s.SteamId))
+                s.Send(frame, WebSocketMessageType.Binary);
+    }
+
+    /// <summary>Periodic: identify unbound browsers and push the roster and scoreboard.</summary>
     public void Tick()
     {
         var snap = _snapshot();
@@ -136,6 +273,30 @@ public sealed class WebServer : IDisposable
             .OrderBy(p => p.Team <= 1 ? 9 : p.Team).ThenBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
             .Select(p => new { id = p.SteamId.ToString(), name = p.Name, team = p.Team, alive = p.Alive })
             .ToList();
+        // Tournament mode: spectators and listed SteamIDs on the server hear every player
+        var allVoice = new HashSet<ulong>();
+        if (_settings.TournamentMode)
+            foreach (var p in snap.BySteamId.Values)
+                if (p.Team <= 1 || _settings.TournamentListeners.Contains(p.SteamId))
+                    allVoice.Add(p.SteamId);
+        _allVoice = allVoice;
+
+        var b = snap.Board;
+        object? board = !_settings.ShowScoreboard ? null : new
+        {
+            warmup = b.Warmup,
+            humans = b.Humans,
+            tWins = b.TWins,
+            ctWins = b.CtWins,
+            round = b.Round,
+            rows = b.Rows.Select(r => new
+            {
+                slot = r.Slot, id = r.Id, name = r.Name, team = r.Team, bot = r.Bot,
+                k = r.Kills, d = r.Deaths, a = r.Assists, hs = r.HeadshotKills, dmg = r.Damage,
+                ud = r.UtilityDamage, ef = r.EnemiesFlashed, z = r.ZeusKills, mvp = r.Mvps,
+                score = r.Score, money = r.Money, alive = r.Alive, ping = r.Ping,
+            }).ToList(),
+        };
 
         foreach (var s in _sessions.Values)
         {
@@ -149,6 +310,9 @@ public sealed class WebServer : IDisposable
                 me = s.SteamId == 0 ? null : s.SteamId.ToString(),
                 online = s.SteamId != 0 && snap.BySteamId.ContainsKey(s.SteamId),
                 players,
+                board,
+                tournament = _settings.TournamentMode,
+                allVoice = s.SteamId != 0 && allVoice.Contains(s.SteamId),
             });
         }
     }
@@ -323,6 +487,7 @@ public sealed class WebServer : IDisposable
     {
         var remote = Normalize(((IPEndPoint)client.Client.RemoteEndPoint!).Address);
         IPAddress? counted = null;
+        SslStream? ssl = null;
         try
         {
             using (client)
@@ -331,7 +496,31 @@ public sealed class WebServer : IDisposable
                     return;
 
                 client.NoDelay = true;
-                var stream = client.GetStream();
+                Stream stream = client.GetStream();
+
+                // One port, both protocols: a TLS handshake starts with byte 0x16, HTTP with a letter
+                var tls = CurrentTls();
+                if (TlsConfigured)
+                {
+                    var first = new byte[1];
+                    using (var wait = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                        if (await client.Client.ReceiveAsync(first, SocketFlags.Peek, wait.Token) == 0)
+                            return;
+                    if (first[0] == 0x16)
+                    {
+                        if (tls == null)
+                            return;
+                        ssl = new SslStream(stream, leaveInnerStreamOpen: false);
+                        using var handshake = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                        await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                        {
+                            ServerCertificateContext = tls.Context,
+                            ApplicationProtocols = new List<SslApplicationProtocol> { SslApplicationProtocol.Http11 },
+                        }, handshake.Token);
+                        stream = ssl;
+                    }
+                }
+
                 var request = await ReadRequest(stream);
                 if (request == null)
                     return;
@@ -362,6 +551,15 @@ public sealed class WebServer : IDisposable
                     await WriteResponse(stream, 405, "text/plain", "Method Not Allowed"u8.ToArray(), method == "HEAD");
                     return;
                 }
+                // With a certificate, send direct plain-HTTP visitors to HTTPS on this same port.
+                // Not through a reverse proxy: that already did TLS, and its requests arrive as plain HTTP.
+                if (ssl == null && tls != null && tls.NotAfter > DateTime.UtcNow && !IsTrustedProxy(remote)
+                    && headers.TryGetValue("host", out var host) && IsSafeHost(host))
+                {
+                    await WriteResponse(stream, 307, "text/plain", Array.Empty<byte>(), method == "HEAD",
+                        $"Location: https://{host}{request.Value.Path}\r\n");
+                    return;
+                }
                 // Served under a reverse-proxy prefix too (e.g. /voice/app.js)
                 var file = _files.Keys.Where(k => k != "/").FirstOrDefault(k => path.EndsWith(k, StringComparison.Ordinal));
                 if (file == null && (path == "/" || path.EndsWith("/", StringComparison.Ordinal) || path.EndsWith("/index.html", StringComparison.Ordinal)))
@@ -375,7 +573,8 @@ public sealed class WebServer : IDisposable
                 await WriteResponse(stream, 200, type, body, method == "HEAD");
             }
         }
-        catch (Exception e) when (e is IOException or SocketException or WebSocketException or OperationCanceledException or ObjectDisposedException)
+        catch (Exception e) when (e is IOException or SocketException or WebSocketException or OperationCanceledException
+                                       or ObjectDisposedException or System.Security.Authentication.AuthenticationException)
         {
         }
         catch (Exception e)
@@ -384,12 +583,17 @@ public sealed class WebServer : IDisposable
         }
         finally
         {
+            ssl?.Dispose();
             if (counted != null)
                 _perIp.AddOrUpdate(counted, 0, (_, n) => Math.Max(0, n - 1));
         }
     }
 
-    private static async Task<(string Method, string Path, Dictionary<string, string> Headers)?> ReadRequest(NetworkStream stream)
+    /// <summary>A Host header that's safe to echo into a redirect: host name or IP, optional port.</summary>
+    private static bool IsSafeHost(string host) =>
+        host.Length is > 0 and <= 255 && host.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or ':' or '[' or ']');
+
+    private static async Task<(string Method, string Path, Dictionary<string, string> Headers)?> ReadRequest(Stream stream)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var buf = new byte[8192];
@@ -421,10 +625,14 @@ public sealed class WebServer : IDisposable
         }
     }
 
-    private static async Task WriteResponse(NetworkStream stream, int status, string type, byte[] body, bool headOnly)
+    private static async Task WriteResponse(Stream stream, int status, string type, byte[] body, bool headOnly, string extraHeaders = "")
     {
-        var reason = status switch { 200 => "OK", 404 => "Not Found", 405 => "Method Not Allowed", 429 => "Too Many Requests", _ => "Error" };
-        var head = $"HTTP/1.1 {status} {reason}\r\nContent-Type: {type}\r\nContent-Length: {body.Length}\r\n" +
+        var reason = status switch
+        {
+            200 => "OK", 307 => "Temporary Redirect", 404 => "Not Found", 405 => "Method Not Allowed",
+            429 => "Too Many Requests", _ => "Error",
+        };
+        var head = $"HTTP/1.1 {status} {reason}\r\nContent-Type: {type}\r\nContent-Length: {body.Length}\r\n{extraHeaders}" +
                    "Cache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n" +
                    "Referrer-Policy: no-referrer\r\nConnection: close\r\n\r\n";
         await stream.WriteAsync(Encoding.ASCII.GetBytes(head));
@@ -432,7 +640,7 @@ public sealed class WebServer : IDisposable
             await stream.WriteAsync(body);
     }
 
-    private async Task RunWebSocket(NetworkStream stream, string key, IPAddress address)
+    private async Task RunWebSocket(Stream stream, string key, IPAddress address)
     {
         var accept = Convert.ToBase64String(SHA1.HashData(Encoding.ASCII.GetBytes(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")));
         await stream.WriteAsync(Encoding.ASCII.GetBytes(

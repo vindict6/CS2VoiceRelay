@@ -3,72 +3,109 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CS2VoiceRelay</title>
+<title>{{PAGE_TITLE}}</title>
 <style>
   :root {
     --bg: #0f1216; --panel: #181c22; --panel2: #1f242c; --line: #2a3039;
     --fg: #e8eaed; --dim: #9aa3ad; --accent: #e8a33a; --accent2: #f4bb5c;
     --ok: #63c46b; --warn: #e0b341; --bad: #e0625b; --ct: #7fb2e5; --t: #e6b25f;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--fg);
     font: 15px/1.45 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
   body { min-height: 100vh; background: radial-gradient(1200px 500px at 50% -200px, #2a2114 0%, var(--bg) 70%); }
-  main { max-width: 760px; margin: 0 auto; padding: 28px 18px 40px; }
+  a { color: var(--accent2); }
+  main { max-width: 1180px; margin: 0 auto; padding: 28px 16px 40px; }
   header { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
-  .logo { width: 42px; height: 42px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), #b9741c);
+  .logo { flex: none; width: 42px; height: 42px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), #b9741c);
     display: grid; place-items: center; font-weight: 800; color: #1b1405; font-size: 18px; letter-spacing: -1px; }
-  h1 { font-size: 24px; margin: 0; letter-spacing: .2px; }
-  .sub { color: var(--dim); font-size: 13px; margin: 0 0 20px 56px; }
+  h1 { font-size: 24px; margin: 0; letter-spacing: .2px; min-width: 0; overflow-wrap: anywhere; }
+  .sub { color: var(--dim); font-size: 14px; margin: 0 0 20px 56px; }
   .pill { margin-left: auto; font-size: 13px; padding: 5px 11px; border-radius: 999px; background: var(--panel2);
     border: 1px solid var(--line); color: var(--dim); white-space: nowrap; }
   .pill::before { content: "\25CF"; margin-right: 6px; }
   .pill[data-state="ok"] { color: var(--ok); } .pill[data-state="warn"] { color: var(--warn); } .pill[data-state="bad"] { color: var(--bad); }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; margin-bottom: 14px; }
   .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin: 0 0 12px; font-weight: 600; }
-  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .server { font-size: 17px; font-weight: 600; }
   .muted { color: var(--dim); }
-  button { font: inherit; border: 0; border-radius: 10px; padding: 10px 16px; cursor: pointer; color: var(--fg);
+  button { font: inherit; border-radius: 10px; padding: 10px 16px; cursor: pointer; color: var(--fg);
     background: var(--panel2); border: 1px solid var(--line); }
   button:hover { border-color: #3a424e; }
   button.primary { background: var(--accent); color: #1b1405; border-color: transparent; font-weight: 700; }
   button.primary:hover { background: var(--accent2); }
-  button.big { width: 100%; padding: 16px; font-size: 17px; }
-  button.icon, button.pbtn { padding: 6px 10px; min-width: 40px; }
   button.on { background: #3a2a2a; border-color: #5a3434; color: #ffb4ad; }
   input[type=range] { -webkit-appearance: none; appearance: none; background: transparent; width: 100%; height: 26px; }
   input[type=range]::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: var(--line); }
   input[type=range]::-moz-range-track { height: 6px; border-radius: 3px; background: var(--line); }
-  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%;
-    background: var(--accent); margin-top: -6px; border: 0; }
-  input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: var(--accent); border: 0; }
-  .volume { display: grid; grid-template-columns: auto 1fr 56px auto; align-items: center; gap: 12px; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--accent); margin-top: -5px; border: 0; }
+  input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); border: 0; }
+
+  /* Voice card */
+  .voice { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 18px; align-items: center; }
+  .server { font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+  .listen-box { display: flex; flex-direction: column; gap: 10px; }
+  #listen { width: 100%; padding: 14px; font-size: 16px; }
+  .volume { display: grid; grid-template-columns: auto 1fr 52px auto; align-items: center; gap: 12px; }
   .volume .label { font-weight: 600; }
   .volume .value { text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
-  .players { display: flex; flex-direction: column; gap: 6px; }
-  .player { display: grid; grid-template-columns: 14px 1fr 140px 44px 40px; align-items: center; gap: 10px;
-    padding: 8px 10px; border-radius: 10px; background: var(--panel2); border: 1px solid transparent; }
-  .player.speaking { border-color: var(--ok); box-shadow: 0 0 0 1px rgba(99,196,107,.25) inset; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: #39404a; }
-  .player.speaking .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .name small { color: var(--dim); margin-left: 6px; }
-  .team-2 .name { color: var(--t); } .team-3 .name { color: var(--ct); }
-  .dead .name { opacity: .6; }
-  .player .value { font-size: 12px; color: var(--dim); text-align: right; font-variant-numeric: tabular-nums; }
-  .player.self { grid-template-columns: 14px 1fr; }
   .choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   .code { display: flex; gap: 8px; margin-top: 12px; }
   .code input { font: inherit; font-size: 20px; letter-spacing: 6px; width: 140px; text-align: center; padding: 8px;
     border-radius: 10px; border: 1px solid var(--line); background: var(--panel2); color: var(--fg); }
+  .solo { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .solo .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .solo .seg button { border: 0; border-radius: 0; padding: 7px 16px; background: var(--panel2); }
+  .solo .seg button + button { border-left: 1px solid var(--line); }
+  .solo .seg button[aria-pressed="true"] { background: var(--accent); color: #1b1405; font-weight: 700; }
+  .solo .seg button[data-team="3"][aria-pressed="true"] { background: var(--ct); }
+  .solo .seg button[data-team="2"][aria-pressed="true"] { background: var(--t); }
   .notice { padding: 12px 14px; border-radius: 10px; background: #221d12; border: 1px solid #4a3b18; color: #f1d595; margin-bottom: 14px; }
   .error { color: var(--bad); margin-top: 8px; min-height: 1em; }
+
+  /* Scoreboard: CompStats' player readout, as a console */
+  .console { background: #0b0d10; border: 1px solid var(--line); border-radius: 14px; padding: 14px 0 12px;
+    font-family: var(--mono); font-size: 13px; margin-bottom: 14px; }
+  .console .line { padding: 2px 16px; color: var(--dim); white-space: pre-wrap; overflow-wrap: break-word; }
+  .console .line b { color: var(--fg); font-weight: 600; }
+  .console .nb { white-space: nowrap; }
+  .console .line .t { color: var(--t); } .console .line .ct { color: var(--ct); }
+  .console .zeus b { color: #9fd3ff; }
+  .board-wrap { overflow-x: auto; margin: 8px 0; }
+  table.board { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  .board th, .board td { padding: 6px 8px; text-align: right; white-space: nowrap; }
+  .board th { color: var(--dim); font-weight: 600; font-size: 12px; border-bottom: 1px solid var(--line); }
+  .board th:first-child, .board td:first-child { padding-left: 16px; }
+  .board th:last-child, .board td:last-child { padding-right: 16px; }
+  .board .l { text-align: left; }
+  .board tbody tr { border-bottom: 1px solid #161a20; }
+  .board tbody tr:hover { background: #12161b; }
+  .board tr.team-2 .team, .board tr.team-2 .pname { color: var(--t); }
+  .board tr.team-3 .team, .board tr.team-3 .pname { color: var(--ct); }
+  .board tr.team-1 .team, .board tr.team-0 .team { color: var(--dim); }
+  .board tr.dead .pname { opacity: .55; }
+  .board .slot { color: #5f6873; }
+  .board .player-cell { display: flex; align-items: center; gap: 8px; max-width: 260px; }
+  .board .pname { overflow: hidden; text-overflow: ellipsis; }
+  .board .tag { color: var(--dim); font-size: 11px; }
+  .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #2c323b; }
+  .board tr.speaking .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .board tr.speaking { background: rgba(99,196,107,.07); }
+  .board .yes { color: var(--ok); } .board .no { color: var(--bad); }
+  .board .voice-col { min-width: 210px; }
+  .board.no-voice .voice-col { display: none; }
+  .vctl { display: grid; grid-template-columns: 1fr 42px 46px; gap: 8px; align-items: center; font-family: "Segoe UI", system-ui, sans-serif; }
+  .vctl .value { font-size: 12px; color: var(--dim); }
+  .vctl button { padding: 3px 8px; font-size: 12px; border-radius: 8px; }
+  .board .empty td { text-align: center; color: var(--dim); padding: 18px; }
+
   footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 22px; }
   .hidden { display: none !important; }
-  @media (max-width: 560px) {
-    .player { grid-template-columns: 14px 1fr 90px 40px 40px; }
+  @media (max-width: 760px) {
+    .voice { grid-template-columns: 1fr; }
     .sub { margin-left: 0; }
+    .board .player-cell { max-width: 150px; }
   }
 </style>
 </head>
@@ -76,10 +113,10 @@
 <main>
   <header>
     <div class="logo">VR</div>
-    <h1>CS2VoiceRelay</h1>
+    <h1>{{PAGE_TITLE}}</h1>
     <span id="conn" class="pill">Connecting</span>
   </header>
-  <p class="sub">Hear in-game voice here when CS2 stops playing it. Keep talking in game as normal.</p>
+  <p class="sub">{{PAGE_DESCRIPTION}}</p>
 
   <section id="identify-none" class="card hidden">
     <h2>Waiting for you</h2>
@@ -101,35 +138,57 @@
 
   <section id="main" class="hidden">
     <div id="offline" class="notice hidden">You're not on the server right now. Voice resumes here when you're back in game.</div>
-
-    <div class="card">
-      <h2>Server</h2>
-      <div class="row">
-        <div>
-          <div class="server" id="host">&nbsp;</div>
-          <div class="muted"><span id="map"></span> &middot; listening as <b id="me"></b></div>
+    <div class="card voice">
+      <div>
+        <h2>Voice</h2>
+        <div class="server" id="host">&nbsp;</div>
+        <div class="muted"><span id="map"></span> &middot; listening as <b id="me"></b></div>
+      </div>
+      <div class="listen-box">
+        <button class="primary" id="listen">Start listening</button>
+        <div class="volume">
+          <span class="label">Volume</span>
+          <input type="range" id="master" min="0" max="200" step="1" value="100" aria-label="Master volume">
+          <span class="value" id="master-value">100%</span>
+          <button id="master-mute" title="Mute everyone">Mute</button>
         </div>
+        <div class="solo hidden" id="solo">
+          <span class="label" style="font-weight:600">Hear</span>
+          <div class="seg" role="group" aria-label="Team solo">
+            <button type="button" data-team="0" aria-pressed="true">Everyone</button>
+            <button type="button" data-team="3" aria-pressed="false">CT only</button>
+            <button type="button" data-team="2" aria-pressed="false">T only</button>
+          </div>
+          <span class="muted" style="font-size:13px">Tournament mode: you're hearing every player.</span>
+        </div>
+        <div class="muted" id="listen-hint">Your browser needs one click before it can play audio.</div>
       </div>
-    </div>
-
-    <div class="card">
-      <button class="primary big" id="listen">Start listening</button>
-      <div class="volume" style="margin-top:16px">
-        <span class="label">Volume</span>
-        <input type="range" id="master" min="0" max="200" step="1" value="100" aria-label="Master volume">
-        <span class="value" id="master-value">100%</span>
-        <button class="icon" id="master-mute" title="Mute everyone">Mute</button>
-      </div>
-      <div class="muted" id="listen-hint" style="margin-top:10px">Your browser needs one click before it can play audio.</div>
-    </div>
-
-    <div class="card">
-      <h2>Players</h2>
-      <div class="players" id="players"></div>
     </div>
   </section>
 
-  <footer>Keep this tab open while you play. While it's listening, you'll still see who's talking in CS2, but the audio only plays here, so you never hear it twice. <span id="version"></span></footer>
+  <section id="scoreboard" class="console hidden" aria-label="Scoreboard">
+    <div class="line" id="status-line"></div>
+    <div class="line" id="teams-line"></div>
+    <div class="board-wrap">
+      <table class="board no-voice" id="board">
+        <thead>
+          <tr>
+            <th class="l">#</th><th class="l">Player</th><th class="l">Team</th>
+            <th title="Kills">K</th><th title="Deaths">D</th><th title="Assists">A</th>
+            <th title="Headshot percentage">HS</th><th title="Damage">DMG</th><th title="Utility damage">UD</th>
+            <th title="Enemies flashed">EF</th><th title="Kills per death">KDR</th><th title="Average damage per round">ADR</th>
+            <th title="Zeus kills">Z</th><th title="MVPs">MVP</th><th>Score</th><th>Money</th>
+            <th>Alive</th><th>Ping</th><th class="l voice-col">Voice</th>
+          </tr>
+        </thead>
+        <tbody id="board-rows"></tbody>
+      </table>
+    </div>
+    <div class="line zeus hidden" id="zeus-line"></div>
+    <div class="line"><span class="nb">---</span> End <span class="nb">---</span></div>
+  </section>
+
+  <footer>{{PAGE_FOOTER}} <span id="version"></span></footer>
 </main>
 <script src="opus-decoder.min.js"></script>
 <script src="voice-engine.js"></script>

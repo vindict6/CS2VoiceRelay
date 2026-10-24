@@ -3,16 +3,19 @@
 // The page needs elements with these ids:
 //   conn, identify-none, your-ip, identify-choose, choices, code-row, code, code-go,
 //   code-hint, code-error, main, offline, host, map, me, listen, master, master-value,
-//   master-mute, listen-hint, players, version
+//   master-mute, listen-hint, version, solo (tournament team solo, buttons with data-team), and for the scoreboard: scoreboard, status-line,
+//   teams-line, board, board-rows, zeus-line
 // It toggles the class "hidden" to show and hide sections, sets data-state="ok|warn|bad" on
-// #conn and data-listening on #listen, and builds player rows from the classes player,
-// team-N, dead, self, speaking, dot, name, name-text, value, pbtn, ctl, on.
+// #conn and data-listening on #listen, and builds scoreboard rows from the classes team-N,
+// dead, self, speaking, dot, pname, tag, vctl, value, on. #board gets "no-voice" until the
+// page is linked to a player, which hides the Voice column.
 (() => {
   "use strict";
 
   const $ = (id) => document.getElementById(id);
   const vr = window.CS2VoiceRelay.createEngine();
   let me = null;
+  let lastMap = "";
 
   function setConn(text, state) {
     const el = $("conn");
@@ -57,6 +60,7 @@
         updateConn();
         break;
     }
+    $("board").classList.toggle("no-voice", !me);
   });
 
   // ------------------------------------------------------------------ identify UI
@@ -85,79 +89,177 @@
   $("code-go").onclick = () => vr.submitCode($("code").value);
   $("code").addEventListener("keydown", (e) => { if (e.key === "Enter") $("code-go").click(); });
 
-  // ------------------------------------------------------------------ roster
+  // ------------------------------------------------------------------ scoreboard
+
+  const TEAM = { 2: "T", 3: "CT", 1: "SPEC" };
+  const TEAM_ORDER = { 3: 0, 2: 1, 1: 2 };
 
   vr.on("state", (st) => {
     $("host").textContent = st.host || "CS2 server";
     $("map").textContent = st.map;
+    lastMap = st.map;
     $("offline").classList.toggle("hidden", !me || st.online);
-    renderPlayers(st.players);
+    $("solo").classList.toggle("hidden", !st.allVoice);
+    renderBoard(st.board);
   });
 
   vr.on("prefs", () => {
     applyMaster();
-    for (const row of $("players").children) syncRow(row);
+    applySolo();
+    for (const row of $("board-rows").children) if (row.dataset.id) syncRow(row);
   });
 
-  function renderPlayers(players) {
-    const list = $("players");
-    const existing = new Map([...list.children].map((el) => [el.dataset.id, el]));
+  function span(cls, text) {
+    const el = document.createElement("span");
+    if (cls) el.className = cls;
+    el.textContent = text;
+    return el;
+  }
+
+  // "---" markers that never break across lines
+  const dash = () => span("nb", "---");
+
+  // CompStats' status lines: "--- Status: Map: X | Warmup: No ---", "--- Humans: N | T Wins: a, CT Wins: b ---"
+  function renderLines(board) {
+    const map = document.createElement("b");
+    map.textContent = lastMap || "-";
+    const warmup = document.createElement("b");
+    warmup.textContent = board.warmup ? "Yes" : "No";
+    $("status-line").replaceChildren(dash(), " Status: Map: ", map, " | Warmup: ", warmup, " ", dash());
+
+    const teams = $("teams-line");
+    teams.replaceChildren(dash(), " Humans: ", document.createElement("b"), " | ", span("t", "T Wins: "), document.createElement("b"),
+      ", ", span("ct", "CT Wins: "), document.createElement("b"), " ", dash());
+    const bold = teams.querySelectorAll("b");
+    bold[0].textContent = board.humans;
+    bold[1].textContent = board.tWins;
+    bold[2].textContent = board.ctWins;
+
+    // "--- Zeus Leader: Name (n Kills) ---", humans only, shown once someone has one
+    let leader = null;
+    for (const r of board.rows) if (!r.bot && r.z > 0 && (!leader || r.z > leader.z)) leader = r;
+    const zeus = $("zeus-line");
+    zeus.classList.toggle("hidden", !leader);
+    if (leader) {
+      zeus.replaceChildren(dash(), " Zeus Leader: ", document.createElement("b"), " (" + leader.z + (leader.z === 1 ? " Kill" : " Kills") + ") ", dash());
+      zeus.querySelector("b").textContent = leader.name;
+    }
+  }
+
+  function renderBoard(board) {
+    $("scoreboard").classList.toggle("hidden", !board);
+    if (!board) return;
+    renderLines(board);
+
+    const rows = [...board.rows].sort((a, b) =>
+      (TEAM_ORDER[a.team] ?? 3) - (TEAM_ORDER[b.team] ?? 3) || b.score - a.score || b.k - a.k ||
+      a.name.localeCompare(b.name));
+    const body = $("board-rows");
+    const existing = new Map([...body.children].map((el) => [el.dataset.key, el]));
+    const rounds = Math.max(board.round || 1, 1);
     let index = 0;
-    for (const p of players) {
-      let row = existing.get(p.id);
-      if (!row) row = createRow(p.id);
-      existing.delete(p.id);
-      row.className = "player team-" + p.team + (p.alive || p.team < 2 ? "" : " dead") + (p.id === me ? " self" : "");
-      row.querySelector(".name-text").textContent = p.name;
-      row.querySelector("small").textContent = p.id === me ? "you" : (p.team >= 2 && !p.alive ? "dead" : "");
-      for (const el of row.querySelectorAll(".ctl")) el.classList.toggle("hidden", p.id === me);
-      if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
+
+    for (const p of rows) {
+      const key = p.id || "bot:" + p.slot + ":" + p.name;
+      let row = existing.get(key);
+      if (!row) row = createRow(key, p.id);
+      existing.delete(key);
+
+      row.className = "team-" + p.team + (p.alive || p.team < 2 ? "" : " dead") + (p.id && p.id === me ? " self" : "");
+      const c = row.cells;
+      c[0].textContent = "[" + p.slot + "]";
+      row.querySelector(".pname").textContent = p.name;
+      row.querySelector(".tag").textContent = p.id && p.id === me ? "you" : p.bot ? "bot" : "";
+      c[2].textContent = TEAM[p.team] || "None";
+      c[3].textContent = p.k;
+      c[4].textContent = p.d;
+      c[5].textContent = p.a;
+      c[6].textContent = p.k > 0 ? (p.hs * 100 / p.k).toFixed(1) + "%" : "0.0%";
+      c[7].textContent = p.dmg;
+      c[8].textContent = p.ud;
+      c[9].textContent = p.ef;
+      c[10].textContent = (p.d > 0 ? p.k / p.d : p.k).toFixed(2);
+      c[11].textContent = (p.dmg / rounds).toFixed(1);
+      c[12].textContent = p.z;
+      c[13].textContent = p.mvp;
+      c[14].textContent = p.score;
+      c[15].textContent = "$" + p.money;
+      c[16].textContent = p.alive ? "Yes" : "No";
+      c[16].className = p.team >= 2 ? (p.alive ? "yes" : "no") : "";
+      c[17].textContent = p.bot ? "BOT" : p.ping;
+
+      const ctl = row.querySelector(".vctl");
+      if (ctl) ctl.classList.toggle("hidden", p.id === me);
+
+      if (body.children[index] !== row) body.insertBefore(row, body.children[index] || null);
       index++;
     }
     for (const el of existing.values()) el.remove();
+
+    if (!rows.length) {
+      const empty = document.createElement("tr");
+      empty.className = "empty";
+      empty.dataset.key = "empty";
+      const td = document.createElement("td");
+      td.colSpan = 19;
+      td.textContent = "No players on the server.";
+      empty.appendChild(td);
+      body.appendChild(empty);
+    }
   }
 
-  function createRow(id) {
-    const row = document.createElement("div");
-    row.dataset.id = id;
-    const dot = document.createElement("span");
-    dot.className = "dot";
-    const name = document.createElement("span");
-    name.className = "name";
-    const text = document.createElement("span");
-    text.className = "name-text";
-    name.append(text, document.createElement("small"));
+  function createRow(key, id) {
+    const row = document.createElement("tr");
+    row.dataset.key = key;
+    if (id) row.dataset.id = id;
+    for (let i = 0; i < 19; i++) row.appendChild(document.createElement("td"));
+    const c = row.cells;
+    c[0].className = "l slot";
+    c[1].className = "l";
+    c[2].className = "l team";
+    c[18].className = "l voice-col";
 
-    const slider = document.createElement("input");
-    slider.type = "range"; slider.min = "0"; slider.max = "200";
-    slider.className = "ctl";
-    slider.setAttribute("aria-label", "Volume");
-    const value = document.createElement("span");
-    value.className = "value ctl";
-    slider.oninput = () => {
-      value.textContent = slider.value + "%";
-      vr.setPlayer(id, { vol: Number(slider.value) });
-    };
-    const mute = document.createElement("button");
-    mute.title = "Mute this player";
-    mute.onclick = () => vr.setPlayer(id, { muted: !vr.getPlayer(id).muted });
-    row.append(dot, name, slider, value, mute);
-    syncRow(row);
+    const cell = document.createElement("div");
+    cell.className = "player-cell";
+    cell.append(span("dot", ""), span("pname", ""), span("tag", ""));
+    c[1].appendChild(cell);
+
+    if (id) {
+      // Voice: this listener's volume and mute for the player, remembered on the server
+      const ctl = document.createElement("div");
+      ctl.className = "vctl";
+      const slider = document.createElement("input");
+      slider.type = "range"; slider.min = "0"; slider.max = "200";
+      slider.setAttribute("aria-label", "Volume");
+      const value = span("value", "");
+      slider.oninput = () => {
+        value.textContent = slider.value + "%";
+        vr.setPlayer(id, { vol: Number(slider.value) });
+      };
+      const mute = document.createElement("button");
+      mute.title = "Mute this player";
+      mute.onclick = () => vr.setPlayer(id, { muted: !vr.getPlayer(id).muted });
+      ctl.append(slider, value, mute);
+      c[18].appendChild(ctl);
+      syncRow(row);
+    }
     return row;
   }
 
   function syncRow(row) {
     const p = vr.getPlayer(row.dataset.id);
     const slider = row.querySelector("input");
+    if (!slider) return;
     if (document.activeElement !== slider) slider.value = String(p.vol);
-    row.querySelector(".value").textContent = p.vol + "%";
-    const mute = row.querySelector("button");
-    mute.className = "pbtn ctl" + (p.muted ? " on" : "") + (row.dataset.id === me ? " hidden" : "");
+    row.querySelector(".vctl .value").textContent = p.vol + "%";
+    const mute = row.querySelector(".vctl button");
+    mute.classList.toggle("on", p.muted);
     mute.textContent = p.muted ? "Off" : "On";
   }
 
   setInterval(() => {
-    for (const row of $("players").children) row.classList.toggle("speaking", vr.isSpeaking(row.dataset.id));
+    for (const row of $("board-rows").children)
+      if (row.dataset.id) row.classList.toggle("speaking", vr.isSpeaking(row.dataset.id));
   }, 120);
 
   // ------------------------------------------------------------------ audio controls
@@ -176,6 +278,14 @@
   };
   $("master-mute").onclick = () => vr.setMaster({ muted: !vr.getMaster().muted });
   applyMaster();
+
+  // Tournament mode: hear everyone, or solo one team
+  function applySolo() {
+    for (const b of $("solo").querySelectorAll("button[data-team]"))
+      b.setAttribute("aria-pressed", String(Number(b.dataset.team) === vr.getSolo()));
+  }
+  for (const b of $("solo").querySelectorAll("button[data-team]")) b.onclick = () => vr.setSolo(Number(b.dataset.team));
+  applySolo();
 
   vr.on("listening", (on) => {
     $("listen").textContent = on ? "Stop listening" : "Start listening";

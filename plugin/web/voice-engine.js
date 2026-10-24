@@ -6,7 +6,10 @@
 //   const vr = CS2VoiceRelay.createEngine({ wsUrl: "/voice/ws" });   // default: "ws" next to the page
 //   vr.on("status", s => ...)   s.phase: connecting | waiting | choose | linked | reconnecting
 //                               s.ip (waiting), s.choices (choose), s.me, s.name (linked)
-//   vr.on("state", st => ...)   st.map, st.host, st.online, st.players [{id, name, team, alive}]
+//   vr.on("state", st => ...)   st.map, st.host, st.online, st.players [{id, name, team, alive}],
+//                               st.board (scoreboard, or null when the server turns it off),
+//                               st.tournament (server in tournament mode), st.allVoice (you hear every player)
+//   vr.getSolo() -> 0 | 2 | 3;  vr.setSolo(team)   with allVoice: hear everyone (0), only T (2) or only CT (3)
 //   vr.on("prefs", () => ...)   volume settings changed (from the server or this page)
 //   vr.on("listening", on => ...), vr.on("code_sent", name => ...), vr.on("code_result", msg => ...)
 //   await vr.start()            call from a click: browsers only allow audio after a user gesture
@@ -67,6 +70,8 @@
     // Volume settings: localStorage until the server sends this player's saved copy
     let master = { volume: clampVolume(store.get("cvr.master", 100)), muted: !!store.get("cvr.masterMuted", false) };
     let players = store.get("cvr.players", {}) || {};
+    let solo = [2, 3].includes(store.get("cvr.solo", 0)) ? store.get("cvr.solo", 0) : 0;
+    const teamOf = new Map();     // steamid -> team, from the latest state
 
     const engine = {
       status: { phase: "connecting" },
@@ -131,6 +136,13 @@
         const s = speakers.get(id);
         if (s) applyGain(id, s);
         send({ t: "pref", id, vol: p.vol, muted: p.muted });
+        emit("prefs");
+      },
+
+      getSolo() { return solo; },
+      setSolo(team) {
+        solo = [2, 3].includes(Number(team)) ? Number(team) : 0;
+        store.set("cvr.solo", solo);
         emit("prefs");
       },
 
@@ -210,7 +222,12 @@
           onServerPrefs(m);
           break;
         case "state":
-          engine.state = { map: m.map || "", host: m.host || "", online: !!m.online, players: m.players || [] };
+          engine.state = {
+            map: m.map || "", host: m.host || "", online: !!m.online, players: m.players || [], board: m.board || null,
+            tournament: !!m.tournament, allVoice: !!m.allVoice,
+          };
+          teamOf.clear();
+          for (const p of engine.state.players) teamOf.set(p.id, p.team);
           emit("state", engine.state);
           break;
       }
@@ -290,6 +307,8 @@
       }
       const s = speaker(id);
       s.last = performance.now();
+      // Team solo (tournament listeners): still shows who's talking, plays only the chosen team
+      if (solo && engine.state && engine.state.allVoice && teamOf.get(id) !== solo) return;
       for (const frame of splitFrames(data, offsets)) {
         if (s.ready) play(s, frame);
         else if (s.queue.length < 50) s.queue.push(frame);

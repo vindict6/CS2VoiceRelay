@@ -18,6 +18,30 @@ public class RelayConfig : BasePluginConfig
     [JsonPropertyName("Port")] public int Port { get; set; } = 27030;
     /// <summary>Link shown to players, e.g. "http://example.com:27030". Empty: http://SERVER-IP:Port.</summary>
     [JsonPropertyName("PublicUrl")] public string PublicUrl { get; set; } = "";
+    /// <summary>
+    /// PEM certificate (full chain) and private key for HTTPS. When both are set, Port speaks HTTP
+    /// and HTTPS at once, and plain-HTTP visitors are sent to HTTPS. This is what makes the page open
+    /// in browsers that remember HSTS for your domain: they only ever try https:// on this port.
+    /// The files are re-read when they change, so certificate renewals are picked up.
+    /// </summary>
+    [JsonPropertyName("TlsCertificate")] public string TlsCertificate { get; set; } = "";
+    [JsonPropertyName("TlsPrivateKey")] public string TlsPrivateKey { get; set; } = "";
+
+    /// <summary>Heading, description and footer of the page. URLs in the description and footer become links.</summary>
+    [JsonPropertyName("PageTitle")] public string PageTitle { get; set; } = "CS2VoiceRelay";
+    [JsonPropertyName("PageDescription")] public string PageDescription { get; set; } = "Hear in-game voice here when CS2 stops playing it. Keep talking in game as normal.";
+    [JsonPropertyName("PageFooter")] public string PageFooter { get; set; } = "Keep this tab open while you play. While it's listening, you'll still see who's talking in CS2, but the audio only plays here, so you never hear it twice.";
+    /// <summary>Show the live scoreboard (CompStats layout) on the page, to everyone who opens it.</summary>
+    [JsonPropertyName("ShowScoreboard")] public bool ShowScoreboard { get; set; } = true;
+
+    /// <summary>
+    /// Tournament mode: browser listeners who are spectators on the server, or whose SteamID64 is
+    /// in TournamentListeners, hear every player's voice, with buttons to solo one team. Players
+    /// on a team still hear only what the game lets them hear.
+    /// </summary>
+    [JsonPropertyName("TournamentMode")] public bool TournamentMode { get; set; } = false;
+    [JsonPropertyName("TournamentListeners")] public List<string> TournamentListeners { get; set; } = new();
+
     /// <summary>Localhost UDP port the CS2VoiceRelayTap Metamod plugin forwards voice to.</summary>
     [JsonPropertyName("TapPort")] public int TapPort { get; set; } = 27031;
     /// <summary>Hold back in-game voice for players who are listening in a browser, so they don't hear it twice.</summary>
@@ -33,7 +57,8 @@ public class RelayConfig : BasePluginConfig
     /// </summary>
     [JsonPropertyName("TrustedProxies")] public List<string> TrustedProxies { get; set; } = new();
     [JsonPropertyName("MaxConnectionsPerIp")] public int MaxConnectionsPerIp { get; set; } = 6;
-    [JsonPropertyName("ChatPrefix")] public string ChatPrefix { get; set; } = " \u0004[Voice]\u0001";
+    /// <summary>Put in front of the plugin's chat messages. Color tags work here too.</summary>
+    [JsonPropertyName("ChatPrefix")] public string ChatPrefix { get; set; } = " {green}[Voice]{default}";
 
     /// <summary>Show JoinMessage to players when they join. false (or an empty JoinMessage) turns it off.</summary>
     [JsonPropertyName("AnnounceOnJoin")] public bool AnnounceOnJoin { get; set; } = true;
@@ -42,9 +67,14 @@ public class RelayConfig : BasePluginConfig
     /// color tags like {green}, {gold}, {lightblue} or {default} use CounterStrikeSharp's chat colors.
     /// </summary>
     [JsonPropertyName("JoinMessage")] public string JoinMessage { get; set; } = "Can't hear anyone after a map change? Open {lightblue}{url}{default} in your browser.";
-    /// <summary>Minimum minutes before the same player sees JoinMessage again. 0: on every join and map change.</summary>
+    /// <summary>Seconds after a player joins before JoinMessage appears.</summary>
+    [JsonPropertyName("JoinMessageDelaySeconds")] public int JoinMessageDelaySeconds { get; set; } = 20;
+    /// <summary>Minimum minutes before the same player sees JoinMessage again on joining. 0: on every join and map change.</summary>
     [JsonPropertyName("JoinMessageIntervalMinutes")] public int JoinMessageIntervalMinutes { get; set; } = 180;
-    /// <summary>Repeat JoinMessage every N minutes to players who aren't listening in a browser. 0: off.</summary>
+    /// <summary>
+    /// After that, repeat JoinMessage every N minutes (one server-wide timer) to players who aren't
+    /// listening in a browser. Anyone who saw it in the last half interval is skipped. 0: off.
+    /// </summary>
     [JsonPropertyName("ReminderIntervalMinutes")] public int ReminderIntervalMinutes { get; set; } = 0;
 }
 
@@ -58,7 +88,7 @@ public class RelayConfig : BasePluginConfig
 public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 {
     public override string ModuleName => "CS2VoiceRelay";
-    public override string ModuleVersion => "2.2.0";
+    public override string ModuleVersion => "2.3.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Hear in-game voice in your browser when CS2's voice playback breaks";
 
@@ -69,6 +99,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
     private PrefsStore? _prefs;
     private volatile ServerSnapshot _snapshot = ServerSnapshot.Empty;
     private readonly Dictionary<ulong, DateTime> _announced = new();
+    private readonly ScoreTracker _scores = new();
     private ConVar? _cvHostname, _cvIp;
     private bool _warnedTap;
 
@@ -82,11 +113,77 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
             throw new Exception($"BindAddress '{config.BindAddress}' is not an IP address");
         config.MaxConnectionsPerIp = Math.Clamp(config.MaxConnectionsPerIp, 1, 64);
         config.JoinMessageIntervalMinutes = Math.Max(0, config.JoinMessageIntervalMinutes);
+        config.JoinMessageDelaySeconds = Math.Clamp(config.JoinMessageDelaySeconds, 1, 600);
+        if (string.IsNullOrWhiteSpace(config.TlsCertificate) != string.IsNullOrWhiteSpace(config.TlsPrivateKey))
+            throw new Exception("Set both TlsCertificate and TlsPrivateKey, or neither");
         config.ReminderIntervalMinutes = Math.Max(0, config.ReminderIntervalMinutes);
+        foreach (var entry in config.TournamentListeners)
+            if (!ulong.TryParse(entry.Trim(), out var id) || id < 76561197960265728UL)
+                throw new Exception($"TournamentListeners entry '{entry}' is not a SteamID64");
         foreach (var entry in config.TrustedProxies)
             if (!TryParseNetwork(entry, out _))
                 throw new Exception($"TrustedProxies entry '{entry}' is not an IP address or CIDR range");
         Config = config;
+        AddConfigNotes();
+    }
+
+    private const string ConfigNotesMarker = "// ---- CS2VoiceRelay notes";
+
+    /// <summary>
+    /// Adds a comment block to the top of CS2VoiceRelay.json listing the chat colors and message
+    /// placeholders. CounterStrikeSharp skips comments when it reads the file, and the block is only
+    /// added when it isn't there, so settings are never touched.
+    /// </summary>
+    private void AddConfigNotes()
+    {
+        try
+        {
+            var path = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", "CS2VoiceRelay", "CS2VoiceRelay.json"));
+            if (!File.Exists(path))
+                return;
+            var text = File.ReadAllText(path);
+            if (text.Contains(ConfigNotesMarker, StringComparison.Ordinal))
+                return;
+
+            var colors = typeof(ChatColors).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                .Where(f => f.FieldType == typeof(char) && !f.IsDefined(typeof(ObsoleteAttribute), false))
+                .Select(f => "{" + f.Name.ToLowerInvariant() + "}")
+                .ToList();
+            var lines = new List<string>
+            {
+                ConfigNotesMarker + " (comments are ignored when the config is read) ----",
+                "// Chat colors for JoinMessage and ChatPrefix. Put the tag in front of the text to color:",
+            };
+            for (var i = 0; i < colors.Count; i += 7)
+                lines.Add("//   " + string.Join(" ", colors.Skip(i).Take(7)));
+            lines.AddRange(new[]
+            {
+                "// JoinMessage placeholders: {url} = PublicUrl (or http://SERVER-IP:Port), {name} = the player's name.",
+                "//   \"JoinMessage\": \"Can't hear anyone? Open {lightblue}{url}{default} in your browser.\"",
+                "//   \"ChatPrefix\": \" {green}[Voice]{default}\"   (start with a space so the first color shows)",
+                "// JoinMessageDelaySeconds: wait after a player joins. ReminderIntervalMinutes: repeat to everyone not listening (0 = off).",
+                "// PageTitle, PageDescription, PageFooter: the web page's text. Plain text; links (https://...) become clickable.",
+                "// TlsCertificate, TlsPrivateKey: PEM files (e.g. Let's Encrypt fullchain.pem, privkey.pem) to serve HTTPS on Port too.",
+                "// TournamentMode: spectators listening in a browser (and SteamID64s in TournamentListeners) hear every player,",
+                "//   with buttons to solo CT or T. Players on a team still only hear their own team.",
+                "// ----",
+            });
+
+            // Keep CounterStrikeSharp's own "generated by" comment line first
+            var insertAt = 0;
+            while (insertAt < text.Length && text.AsSpan(insertAt).TrimStart(" \t").StartsWith("//"))
+            {
+                var eol = text.IndexOf('\n', insertAt);
+                insertAt = eol < 0 ? text.Length : eol + 1;
+            }
+            var newline = text.Contains("\r\n") ? "\r\n" : "\n";
+            var block = string.Join(newline, lines) + newline;
+            File.WriteAllText(path, text.Insert(insertAt, block));
+        }
+        catch (Exception e)
+        {
+            Logger.LogDebug(e, "Couldn't add notes to the config file");
+        }
     }
 
     private static bool TryParseNetwork(string text, out IPNetwork network)
@@ -114,6 +211,14 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
                 Port = Config.Port,
                 TrustedProxies = Config.TrustedProxies.Select(t => { TryParseNetwork(t, out var n); return n; }).ToList(),
                 MaxConnectionsPerIp = Config.MaxConnectionsPerIp,
+                TlsCertificate = Config.TlsCertificate.Trim(),
+                TlsPrivateKey = Config.TlsPrivateKey.Trim(),
+                PageTitle = Config.PageTitle,
+                PageDescription = Config.PageDescription,
+                PageFooter = Config.PageFooter,
+                ShowScoreboard = Config.ShowScoreboard,
+                TournamentMode = Config.TournamentMode,
+                TournamentListeners = Config.TournamentListeners.Select(e => ulong.Parse(e.Trim())).ToHashSet(),
             },
             () => _snapshot,
             SendCodeToPlayer,
@@ -132,12 +237,23 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         if (Config.ReminderIntervalMinutes > 0)
             AddTimer(Config.ReminderIntervalMinutes * 60f, SendReminders, TimerFlags.REPEAT);
 
+        RegisterListener<Listeners.OnMapStart>(_ => _scores.Reset());
+        RegisterEventHandler<EventPlayerDeath>((e, _) =>
+        {
+            _scores.OnPlayerDeath(e);
+            return HookResult.Continue;
+        });
+        RegisterEventHandler<EventRoundAnnounceMatchStart>((_, _) =>
+        {
+            _scores.ResetMatch();
+            return HookResult.Continue;
+        });
+
         RegisterListener<Listeners.OnClientPutInServer>(slot =>
         {
             if (!Config.AnnounceOnJoin || string.IsNullOrWhiteSpace(Config.JoinMessage))
                 return;
-            // Chat isn't visible yet while the player is still loading in.
-            AddTimer(10f, () =>
+            AddTimer(Config.JoinMessageDelaySeconds, () =>
             {
                 var player = Utilities.GetPlayerFromSlot(slot);
                 if (player is not { IsValid: true, IsBot: false } || player.SteamID == 0)
@@ -156,9 +272,17 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         if (_web == null || string.IsNullOrWhiteSpace(Config.JoinMessage))
             return;
         var listening = _web.ListeningSteamIds();
+        var recent = TimeSpan.FromMinutes(Config.ReminderIntervalMinutes / 2.0);
         foreach (var player in Utilities.GetPlayers())
-            if (player is { IsValid: true, IsBot: false } && player.SteamID != 0 && !listening.Contains(player.SteamID))
-                player.PrintToChat(FormatJoinMessage(player));
+        {
+            if (player is not { IsValid: true, IsBot: false } || player.SteamID == 0 || listening.Contains(player.SteamID))
+                continue;
+            // Saw it moments ago on joining: wait for the next round of reminders
+            if (_announced.TryGetValue(player.SteamID, out var when) && DateTime.UtcNow - when < recent)
+                continue;
+            _announced[player.SteamID] = DateTime.UtcNow;
+            player.PrintToChat(FormatJoinMessage(player));
+        }
     }
 
     private static readonly Dictionary<string, string> ChatColorTags = BuildChatColorTags();
@@ -172,12 +296,19 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         return tags;
     }
 
-    private string FormatJoinMessage(CCSPlayerController player)
+    private static string ApplyColors(string text)
     {
-        var text = Config.JoinMessage.Replace("{url}", PlayerUrl()).Replace("{name}", player.PlayerName);
         foreach (var (tag, code) in ChatColorTags)
             text = text.Replace(tag, code, StringComparison.OrdinalIgnoreCase);
-        return $"{Config.ChatPrefix} {text}";
+        return text;
+    }
+
+    private string Prefix => ApplyColors(Config.ChatPrefix);
+
+    private string FormatJoinMessage(CCSPlayerController player)
+    {
+        var text = ApplyColors(Config.JoinMessage.Replace("{url}", PlayerUrl()).Replace("{name}", player.PlayerName));
+        return $"{Prefix} {text}";
     }
 
     public override void Unload(bool hotReload)
@@ -197,7 +328,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         var listening = player is { IsValid: true } && _web != null && _web.ListeningSteamIds().Contains(player.SteamID);
         var tap = _tap?.TapAlive == true ? "" : "  \u0002(voice tap not running)\u0001";
         var you = player != null ? $"  You: {(listening ? "\u0004listening" : "not connected")}\u0001" : "";
-        command.ReplyToCommand($"{Config.ChatPrefix} Browser voice: \u0003{PlayerUrl()}\u0001{you}{tap}");
+        command.ReplyToCommand($"{Prefix} Browser voice: \u0003{PlayerUrl()}\u0001{you}{tap}");
     }
 
     private string PlayerUrl()
@@ -214,7 +345,11 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
     /// <summary>Tap thread: the engine sent this voice packet to the player in RecipientSlot.</summary>
     private void OnTapVoice(TapVoicePacket packet)
     {
-        if (_web != null && _snapshot.BySlot.TryGetValue(packet.RecipientSlot, out var recipient))
+        if (_web == null)
+            return;
+        if (Config.TournamentMode)
+            _web.RouteToAllVoice(packet.SpeakerXuid, packet.Frame);
+        if (_snapshot.BySlot.TryGetValue(packet.RecipientSlot, out var recipient))
             _web.RouteVoice(recipient.SteamId, packet.Frame);
     }
 
@@ -225,7 +360,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         {
             var player = Utilities.GetPlayerFromSteamId(steamId);
             if (player is { IsValid: true })
-                player.PrintToChat($"{Config.ChatPrefix} Your browser voice code is \u0004{code}\u0001. Only enter it if you opened the voice page yourself.");
+                player.PrintToChat($"{Prefix} Your browser voice code is \u0004{code}\u0001. Only enter it if you opened the voice page yourself.");
         });
     }
 
@@ -253,12 +388,23 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         }
 
         _cvHostname ??= ConVar.Find("hostname");
+        ScoreBoard board;
+        try
+        {
+            board = Config.ShowScoreboard ? _scores.Build() : ScoreBoard.Empty;
+        }
+        catch (Exception e)
+        {
+            Logger.LogDebug(e, "Scoreboard read failed");
+            board = ScoreBoard.Empty;
+        }
         _snapshot = new ServerSnapshot
         {
             BySlot = bySlot,
             BySteamId = bySteam,
             Map = Server.MapName,
             Hostname = _cvHostname?.StringValue ?? "",
+            Board = board,
         };
     }
 
