@@ -45,6 +45,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 #include "extension.h"
 #include <iserver.h>
 #include "utils/module.h"
@@ -97,12 +98,13 @@ static void* g_pServerSideClientVTable = nullptr;
 
 // SendNetMessage can be called off the main thread; KHook swaps the vtable slot
 // (no code patching) and its dispatch is thread-safe
-KHook::Virtual<CServerSideClientBase, bool, const CNetMessage*, NetChannelBufType_t> g_hookSendNetMessage(&CServerSideClientBase::SendNetMessage, &g_CS2VoiceRelayTap, &CS2VoiceRelayTap::Hook_SendNetMessage, nullptr);
+KHook::Virtual<CServerSideClientBase, bool, const CNetMessage*, NetChannelBufType_t> g_hookSendNetMessage(&CServerSideClientBase::SendNetMessage, &g_CS2VoiceRelayTap, &CS2VoiceRelayTap::Hook_SendNetMessage, &CS2VoiceRelayTap::Hook_SendNetMessagePost);
 
 // ---------------------------------------------------------------------------- localhost link
 
 // tap -> plugin   "CVT1" voice packet (see BuildVoicePacket), "CVH1" heartbeat
-// plugin -> tap   "CVC1" u64 suppress mask (bit = player slot), u32 valid_ms
+// plugin -> tap   "CVC1" u64 suppress mask (bit = player slot), u32 valid_ms,
+//                 [u8 flags: 1 = send those players silence instead of dropping their voice]
 static tap_socket_t g_socket = TAP_INVALID_SOCKET;
 static std::atomic<uint16_t> g_relayPort{DEFAULT_RELAY_PORT};
 static std::string g_configPath;   // CounterStrikeSharp config of the CS2VoiceRelay plugin
@@ -111,6 +113,7 @@ static std::atomic<bool> g_running{false};
 static std::thread g_controlThread;
 static std::atomic<uint64_t> g_suppressMask{0};
 static std::atomic<int64_t> g_suppressUntilMs{0};
+static std::atomic<bool> g_suppressSilent{false};   // send silence (keeps speaking icons) instead of dropping
 static std::atomic<uint32_t> g_sent{0};
 
 static int64_t NowMs()
@@ -232,6 +235,7 @@ static void ControlLoop()
 		memcpy(&validMs, buf + 12, 4);
 		if (validMs > 10000)
 			validMs = 10000;
+		g_suppressSilent.store(n >= 17 && (buf[16] & 1) != 0);
 		g_suppressMask.store(mask);
 		g_suppressUntilMs.store(NowMs() + validMs);
 	}
@@ -406,6 +410,104 @@ static void ForwardVoice(int recipient, const google::protobuf::Message& msg, co
 	SendToRelay(buf, (size_t)(p - buf));
 }
 
+// ---------------------------------------------------------------------------- silent voice for listeners
+
+// A 20 ms Opus frame of silence (the same one Discord and WebRTC send)
+static const char kOpusSilence[3] = {(char)0xF8, (char)0xFF, (char)0xFE};
+
+// The real audio of the message currently being sent with silence, per sending thread.
+// Only bytes are swapped in place: the engine's string and repeated field are never
+// reallocated, so no memory crosses between this plugin's allocator and the engine's.
+struct SilenceStash
+{
+	bool active = false;
+	std::string* data = nullptr;
+	std::string original;
+	google::protobuf::Message* audio = nullptr;
+	const google::protobuf::FieldDescriptor* offsetsField = nullptr;
+	std::vector<uint32_t> offsets;
+};
+static thread_local SilenceStash t_stash;
+
+static bool MakeSilent(google::protobuf::Message& msg, const VoiceFields& f)
+{
+	const google::protobuf::Reflection* refl = msg.GetReflection();
+	if (t_stash.active || !refl->HasField(msg, f.audio))
+		return false;
+
+	google::protobuf::Message* audio = refl->MutableMessage(&msg, f.audio);
+	const google::protobuf::Reflection* ar = audio->GetReflection();
+	if (!ar->HasField(*audio, f.voiceData))
+		return false;
+
+	std::string scratch;
+	const std::string& ref = ar->GetStringReference(*audio, f.voiceData, &scratch);
+	if (&ref == &scratch || ref.empty())
+		return false;
+	std::string& data = const_cast<std::string&>(ref);
+	const size_t len = data.size();
+
+	// Keep the frame count and the offsets' convention (start positions, end positions or
+	// lengths) so the client paces the silence exactly like the real audio
+	int count = f.packetOffsets ? ar->FieldSize(*audio, f.packetOffsets) : 0;
+	if (count > 64)
+		return false;
+	std::vector<uint32_t> offsets;
+	uint64_t sum = 0;
+	for (int i = 0; i < count; i++)
+	{
+		offsets.push_back(ar->GetRepeatedUInt32(*audio, f.packetOffsets, i));
+		sum += offsets.back();
+	}
+	const size_t frames = count > 0 ? (size_t)count : 1;
+	if (frames * sizeof(kOpusSilence) > len)
+		return false; // only ever shrink: growing could reallocate the engine's string
+
+	t_stash.original.assign(data.data(), len);
+	t_stash.offsets = offsets;
+
+	data.resize(frames * sizeof(kOpusSilence));
+	for (size_t i = 0; i < frames; i++)
+		memcpy(&data[i * sizeof(kOpusSilence)], kOpusSilence, sizeof(kOpusSilence));
+
+	if (count > 0)
+	{
+		const bool starts = offsets[0] == 0;
+		const bool lengths = !starts && offsets.back() != len && sum == len;
+		for (int i = 0; i < count; i++)
+		{
+			uint32_t value = starts ? 3u * i : lengths ? 3u : 3u * (i + 1);
+			ar->SetRepeatedUInt32(audio, f.packetOffsets, i, value);
+		}
+	}
+
+	t_stash.active = true;
+	t_stash.data = &data;
+	t_stash.audio = audio;
+	t_stash.offsetsField = count > 0 ? f.packetOffsets : nullptr;
+	return true;
+}
+
+static void RestoreSilent()
+{
+	if (!t_stash.active)
+		return;
+	std::string& data = *t_stash.data;
+	// Back to the original length: within the capacity it had, so no reallocation
+	data.resize(t_stash.original.size());
+	memcpy(&data[0], t_stash.original.data(), t_stash.original.size());
+	if (t_stash.offsetsField)
+	{
+		const google::protobuf::Reflection* ar = t_stash.audio->GetReflection();
+		for (size_t i = 0; i < t_stash.offsets.size(); i++)
+			ar->SetRepeatedUInt32(t_stash.audio, t_stash.offsetsField, (int)i, t_stash.offsets[i]);
+	}
+	t_stash.active = false;
+	t_stash.data = nullptr;
+	t_stash.audio = nullptr;
+	t_stash.offsetsField = nullptr;
+}
+
 KHook::Return<bool> CS2VoiceRelayTap::Hook_SendNetMessage(CServerSideClientBase* pClient, const CNetMessage* pData, NetChannelBufType_t bufType)
 {
 	if (!pClient || !pData)
@@ -440,12 +542,23 @@ KHook::Return<bool> CS2VoiceRelayTap::Hook_SendNetMessage(CServerSideClientBase*
 
 	// The player is listening in a browser: don't also play it in game. The plugin
 	// refreshes the mask continuously, so this lapses on its own if the plugin stops.
-	if ((g_suppressMask.load(std::memory_order_relaxed) >> slot) & 1)
+	if (((g_suppressMask.load(std::memory_order_relaxed) >> slot) & 1)
+		&& NowMs() < g_suppressUntilMs.load(std::memory_order_relaxed))
 	{
-		if (NowMs() < g_suppressUntilMs.load(std::memory_order_relaxed))
-			return {KHook::Action::Supersede, true};
+		// Send silence instead of dropping the packet, so CS2 still shows who's talking.
+		// The post hook puts the real audio back before the next recipient's copy.
+		if (g_suppressSilent.load(std::memory_order_relaxed)
+			&& MakeSilent(const_cast<google::protobuf::Message&>(*msg), s_fields))
+			return {KHook::Action::Ignore};
+		return {KHook::Action::Supersede, true};
 	}
 
+	return {KHook::Action::Ignore};
+}
+
+KHook::Return<bool> CS2VoiceRelayTap::Hook_SendNetMessagePost(CServerSideClientBase* pClient, const CNetMessage* pData, NetChannelBufType_t bufType)
+{
+	RestoreSilent();
 	return {KHook::Action::Ignore};
 }
 
@@ -533,7 +646,7 @@ const char *CS2VoiceRelayTap::GetLicense()
 
 const char *CS2VoiceRelayTap::GetVersion()
 {
-	return "2.0.0";
+	return "2.2.0";
 }
 
 const char *CS2VoiceRelayTap::GetDate()

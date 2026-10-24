@@ -42,6 +42,7 @@ public:
 	void AllPluginsLoaded();
 public: //hooks
 	KHook::Return<bool> Hook_SendNetMessage(CServerSideClientBase* pClient, const CNetMessage* pData, NetChannelBufType_t bufType);
+	KHook::Return<bool> Hook_SendNetMessagePost(CServerSideClientBase* pClient, const CNetMessage* pData, NetChannelBufType_t bufType);
 public:
 	const char *GetAuthor();
 	const char *GetName();

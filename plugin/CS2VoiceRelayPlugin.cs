@@ -23,6 +23,11 @@ public class RelayConfig : BasePluginConfig
     /// <summary>Hold back in-game voice for players who are listening in a browser, so they don't hear it twice.</summary>
     [JsonPropertyName("SuppressGameVoiceForListeners")] public bool SuppressGameVoiceForListeners { get; set; } = true;
     /// <summary>
+    /// For players listening in a browser, send their game silent voice instead of none, so CS2
+    /// still shows who's talking (speaking icons) while the audio plays only in the browser.
+    /// </summary>
+    [JsonPropertyName("ShowInGameSpeakingIndicators")] public bool ShowInGameSpeakingIndicators { get; set; } = true;
+    /// <summary>
     /// Reverse proxies (IPs or CIDR ranges) whose X-Forwarded-For identifies the browser, e.g.
     /// ["127.0.0.1", "172.16.0.0/12"] for a proxy on this machine or in Docker. Empty: no proxy.
     /// </summary>
@@ -53,7 +58,7 @@ public class RelayConfig : BasePluginConfig
 public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 {
     public override string ModuleName => "CS2VoiceRelay";
-    public override string ModuleVersion => "2.1.0";
+    public override string ModuleVersion => "2.2.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Hear in-game voice in your browser when CS2's voice playback breaks";
 
@@ -270,7 +275,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
                     mask |= 1UL << p.Slot;
         }
         // Valid for 2 s: if this plugin stops, in-game voice comes back on its own
-        _tap.SendSuppressMask(mask, 2000);
+        _tap.SendSuppressMask(mask, 2000, Config.ShowInGameSpeakingIndicators);
     }
 
     private void CheckTap()

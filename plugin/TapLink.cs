@@ -12,7 +12,7 @@ public readonly record struct TapVoicePacket(int RecipientSlot, ulong SpeakerXui
 /// Localhost UDP link to the CS2VoiceRelayTap Metamod plugin.
 ///
 ///   tap -> plugin  "CVT1" voice packet, "CVH1" heartbeat
-///   plugin -> tap  "CVC1" u64 suppress mask (bit = player slot), u32 valid_ms
+///   plugin -> tap  "CVC1" u64 suppress mask (bit = player slot), u32 valid_ms, u8 flags (1 = silence, not drop)
 ///
 /// Runs on its own thread; never touches game objects.
 /// </summary>
@@ -43,16 +43,21 @@ public sealed class TapLink : IDisposable
         _log.LogInformation("Waiting for CS2VoiceRelayTap on {EndPoint}", _udp.Client.LocalEndPoint);
     }
 
-    /// <summary>Tell the tap which recipients are listening in a browser (their in-game copy is held back).</summary>
-    public void SendSuppressMask(ulong mask, uint validMs)
+    /// <summary>
+    /// Tell the tap which recipients are listening in a browser. Their in-game copy is held
+    /// back; with <paramref name="silent"/> it's replaced by silence instead of dropped, so CS2
+    /// still shows who's talking.
+    /// </summary>
+    public void SendSuppressMask(ulong mask, uint validMs, bool silent = false)
     {
         var tap = _tap;
         if (tap == null)
             return;
-        var buf = new byte[16];
+        var buf = new byte[17];
         "CVC1"u8.CopyTo(buf);
         BinaryPrimitives.WriteUInt64LittleEndian(buf.AsSpan(4), mask);
         BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(12), validMs);
+        buf[16] = (byte)(silent ? 1 : 0);
         try { _udp.Send(buf, buf.Length, tap); }
         catch (SocketException) { }
         catch (ObjectDisposedException) { }

@@ -18,9 +18,9 @@ keep open next to the game.
 - The page waits until you've joined the server, recognises you by your IP, and plays exactly
   the voice your game would have received: team rules, `sv_alltalk`, dead talk, mutes and every
   other routing decision are the engine's own.
-- While the page is listening, the server stops sending you the in-game copy, so if your CS2
-  voice still works you don't hear everyone twice. Close the tab and in-game voice is back within
-  two seconds.
+- While the page is listening, your game gets the same voice packets with the audio replaced by
+  silence: CS2 still shows who's talking (speaking icons, scoreboard), but you only hear it in the
+  browser, never twice. Close the tab and normal in-game voice is back within two seconds.
 - Volume control for everyone and per player, remembered between visits. No install, no
   microphone permission, works over plain HTTP in any modern browser.
 
@@ -36,9 +36,11 @@ player's game ──voice──▶ CS2 server ──svc_VoiceData──▶ your 
 
 - **`native/`, CS2VoiceRelayTap**: a Metamod plugin hooking `CServerSideClient::SendNetMessage`.
   For every `svc_VoiceData` the engine sends a player, it forwards the speaker's SteamID and the
-  Opus audio to `127.0.0.1:27031`. It can hold back the in-game copy for players who are
-  listening in a browser; that instruction expires after two seconds unless the plugin keeps
-  renewing it, so in-game voice can't stay switched off if the plugin stops.
+  Opus audio to `127.0.0.1:27031`. For players who are listening in a browser it swaps the
+  in-game copy's audio for Opus silence frames (or drops it), keeping CS2's speaking icons without
+  doubling the audio. The audio bytes are swapped in place and restored after each send, so no
+  memory changes hands with the engine. That instruction expires after two seconds unless the
+  plugin keeps renewing it, so in-game voice can't stay switched off if the plugin stops.
 - **`plugin/`, CS2VoiceRelay**: a CounterStrikeSharp plugin that serves the page and a WebSocket
   on TCP 27030, matches each browser to a player by IP, and forwards that player's voice to it.
   When several players share one IP, the page asks which one you are and confirms with a code
@@ -70,7 +72,8 @@ Requires Metamod:Source 2.0 (dev build 1461 or later) and
 | `BindAddress` | `0.0.0.0` | Interface to listen on |
 | `PublicUrl` | `""` | Link shown to players, e.g. `http://example.com:27030` (default: `http://SERVER-IP:Port`) |
 | `TapPort` | `27031` | Localhost UDP port between the Metamod tap and this plugin. The tap reads it from this file too and follows changes within 5 seconds; reload the plugin after changing it |
-| `SuppressGameVoiceForListeners` | `true` | Hold back in-game voice for players listening in a browser |
+| `SuppressGameVoiceForListeners` | `true` | Hold back in-game voice audio for players listening in a browser, so they don't hear it twice |
+| `ShowInGameSpeakingIndicators` | `true` | While holding it back, send those players silence instead of nothing, so CS2 still shows who's talking. `false` drops their in-game voice entirely |
 | `TrustedProxies` | `[]` | Reverse proxies (IPs or CIDR ranges) whose `X-Forwarded-For` identifies the browser, e.g. `["127.0.0.1", "172.16.0.0/12"]` for a proxy on the same machine or in Docker. Empty means no proxy |
 | `MaxConnectionsPerIp` | `6` | Browser connections allowed per player IP |
 | `AnnounceOnJoin` | `true` | Show `JoinMessage` to players when they join. `false` (or an empty `JoinMessage`) turns the message off |
