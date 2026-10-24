@@ -45,8 +45,11 @@ the server would normally let them hear**, and it keeps working across every map
    | `MaxPacketsPerSecond` | `80` | Per-client rate limit (normal speech is 50/s) |
    | `ForgetAfterSeconds` | `300` | Keep a player's token and voice session this long after they leave the server |
 
-Players get a token in chat when they join (`!voice` shows it again). The token is tied to
-their SteamID, so nobody can transmit as someone else.
+Players get a token when they join: in chat while they aren't linked, and always as a line in
+their console that the voice client reads automatically. `!voice` shows it in chat again;
+`css_voicerelay` prints just the console line (token plus link status). The token is tied to
+their SteamID, so nobody can transmit as someone else. If `PublicAddress` is empty, the client
+connects to the relay on the same IP as the game server.
 
 The voice client stays connected through map changes and quick rejoins: the token stays the
 same, and the relay keeps the player's session until they've been off the server for
@@ -57,11 +60,33 @@ any audio; nobody has to reconnect the voice client.
 
 1. Download `CS2VoiceRelay-client-windows.zip` from [Releases](../../releases) and run
    `CS2VoiceRelay.exe` (or `python voiceclient.py` with `pip install -r requirements.txt`).
-2. Join the server, read the address and token from chat, paste them into the client, press
-   **Connect**. Your SteamID and push-to-talk key are filled in from Steam automatically.
-3. Hold your normal voice key. The client shows who you can hear and who's talking.
+2. One-time: in Steam, right-click Counter-Strike 2 → Properties → Launch Options and add
+   `-netconport 2121`. This opens CS2's local console port, which the client uses to read
+   which server you're on and fetch your token.
+3. Start the client and CS2, then join a server running CS2VoiceRelay. The client runs `status`
+   and `css_voicerelay` through the console, fills in the server, token and SteamID, and
+   connects by itself. If you switch servers it reconnects to the new one.
+4. Hold your normal voice key. The client shows who you can hear and who's talking.
+
+Without the launch option, untick **Detect server and token from CS2**, type `!voice` in game,
+and copy the server and token from chat into the client.
 
 The client keeps its settings in `%APPDATA%\CS2VoiceRelay\settings.json`.
+
+### Securing the console port
+
+CS2's console port has no password and listens on every network interface, not just your own
+PC, so anything that can reach it can run console commands in your game. Home routers block it
+from the internet, but on shared networks (LAN events, dorms, campus Wi-Fi) other machines could
+reach it. Block remote access with one command in an administrator PowerShell; the client
+talks to the port from your own PC, which the firewall rule doesn't affect:
+
+```powershell
+New-NetFirewallRule -DisplayName "CS2 console port (block remote)" -Direction Inbound -Protocol TCP -LocalPort 2121 -Action Block
+```
+
+The client only accepts relay info from the plugin's own console line (start of line, your
+SteamID), so a player can't redirect your voice by typing a look-alike line in chat.
 
 ## How voice routing is enforced
 

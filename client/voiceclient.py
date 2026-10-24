@@ -9,7 +9,10 @@ for identity, team/alive state and the server's voice rules; you hear exactly wh
 would normally let you hear.
 
     python voiceclient.py                      # GUI
+    python voiceclient.py --nogui              # terminal, server and token detected from CS2
     python voiceclient.py --server host:port --token XXXXXXXX --nogui
+
+Auto-detect needs CS2 launched with  -netconport 2121  (Steam > CS2 > Properties > Launch Options).
 
 Your SteamID and push-to-talk key are read from the local Steam install.
 """
@@ -31,7 +34,7 @@ import sounddevice as sd
 from pynput import keyboard, mouse
 
 APP_NAME = "CS2VoiceRelay"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.1.0"
 
 MAGIC = b"CVR1"
 T_HELLO, T_AUDIO, T_PING, T_PONG, T_BYE, T_WELCOME, T_SPEAK, T_STATE = 1, 2, 3, 4, 5, 6, 7, 8
@@ -39,6 +42,7 @@ TOKEN_LEN = 8
 SAMPLE_RATE = 16000
 FRAME = 320  # 20 ms
 STEAMID64_BASE = 76561197960265728
+DEFAULT_NETCON_PORT = 2121
 
 RULE_ALLTALK, RULE_DEADTALK, RULE_FULL_ALLTALK, RULE_ENEMY_DEAD, RULE_ENEMY_LIVING, RULE_VOICE_DISABLED = 1, 2, 4, 8, 16, 32
 FLAG_ALIVE, FLAG_LINKED, FLAG_SPEAKING, FLAG_CAN_HEAR, FLAG_SELF, FLAG_MUTED = 1, 2, 4, 8, 16, 32
@@ -242,6 +246,144 @@ class Player:
         self.muted = bool(flags & FLAG_MUTED)
 
 
+class GameConsole:
+    """
+    Reads CS2's console through its -netconport TCP console to find the server you're on and
+    your relay token, so nothing has to be copied by hand. It runs `status` (the client prints
+    "Client:  Connected [ip:port] ...") and the plugin's `css_voicerelay` command, whose reply is
+    one line: "CS2VoiceRelay relay=HOST:PORT token=XXXXXXXX steamid=... status=... proto=1".
+
+    Both patterns are anchored to the start of a line and the SteamID must be yours, so a
+    player can't redirect your voice by typing a look-alike line in chat.
+    """
+
+    RE_CLIENT = re.compile(r"^\s*Client:\s+(.*)$")
+    RE_ADDR = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})")
+    RE_RELAY = re.compile(r"^CS2VoiceRelay relay=(\S*):(\d{1,5}) token=([A-Z0-9]{8}) steamid=(\d{17}) status=(\w+)")
+
+    def __init__(self, port, my_steamid=None):
+        self.port = port
+        self.my_steamid = my_steamid
+        self.lock = threading.Lock()
+        self.state = "searching"     # searching | connected
+        self.in_game = None          # True/False once `status` has answered
+        self.game_server = None      # "ip:port" from `status`
+        self.relay_host = None       # from the plugin; "" means "same host as the game server"
+        self.relay_port = None
+        self.token = None
+        self.steamid = None
+        self.relay_status = None
+        self.relay_for_server = None # game_server the relay line arrived for
+        self._poll_now = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._stop.set()
+        self._poll_now.set()
+
+    def poll_now(self):
+        self._poll_now.set()
+
+    def snapshot(self):
+        """(state, in_game, game_server, relay "host:port" or None, token, steamid, relay_status)"""
+        with self.lock:
+            relay = None
+            fresh = self.relay_for_server == self.game_server or self.game_server is None
+            if self.token and self.relay_port and fresh:
+                host = self.relay_host or (self.game_server.split(":")[0] if self.game_server else "")
+                if host:
+                    relay = f"{host}:{self.relay_port}"
+            return (self.state, self.in_game, self.game_server, relay,
+                    self.token if fresh else None, self.steamid, self.relay_status)
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                sock = socket.create_connection(("127.0.0.1", self.port), timeout=2)
+            except OSError:
+                with self.lock:
+                    self.state = "searching"
+                self._poll_now.wait(3)
+                self._poll_now.clear()
+                continue
+            with self.lock:
+                self.state = "connected"
+            sock.settimeout(0.5)
+            buf = b""
+            next_poll = 0.0
+            try:
+                while not self._stop.is_set():
+                    now = time.monotonic()
+                    if now >= next_poll or self._poll_now.is_set():
+                        self._poll_now.clear()
+                        sock.sendall(b"status\ncss_voicerelay\n")
+                        with self.lock:
+                            have_info = bool(self.token) and self.relay_for_server == self.game_server
+                        next_poll = now + (20.0 if have_info else 5.0)
+                    try:
+                        data = sock.recv(65536)
+                    except socket.timeout:
+                        continue
+                    if not data:
+                        break
+                    buf += data
+                    *lines, buf = buf.split(b"\n")
+                    for raw in lines:
+                        self._parse(raw.decode("utf-8", "replace").strip("\r\x00"))
+            except OSError:
+                pass
+            finally:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            with self.lock:
+                self.state = "searching"
+
+    def _parse(self, line):
+        m = self.RE_CLIENT.match(line)
+        if m:
+            text = m.group(1)
+            with self.lock:
+                if text.startswith("Connected"):
+                    addr = self.RE_ADDR.search(text)
+                    self.in_game = True
+                    self.game_server = f"{addr.group(1)}:{addr.group(2)}" if addr else None
+                elif "connected" in text.lower():  # "Not Connected" / "Disconnected"
+                    self.in_game = False
+            return
+        m = self.RE_RELAY.match(line)
+        if m:
+            steamid = int(m.group(4))
+            if self.my_steamid and steamid != self.my_steamid:
+                return
+            with self.lock:
+                self.relay_host, self.relay_port = m.group(1), int(m.group(2))
+                self.token, self.steamid, self.relay_status = m.group(3), steamid, m.group(5)
+                self.relay_for_server = self.game_server
+
+
+def open_stream(stream_cls, device, callback):
+    """
+    Open a 16 kHz mono stream. WASAPI shared mode only accepts the device's own mixer rate
+    (usually 48 kHz), so for WASAPI devices ask Windows to convert; MME/DirectSound convert
+    on their own.
+    """
+    is_input = stream_cls is sd.RawInputStream
+    info = sd.query_devices(device, kind="input" if is_input else "output")
+    api = sd.query_hostapis(info["hostapi"])["name"]
+    extra = sd.WasapiSettings(auto_convert=True) if "WASAPI" in api else None
+    try:
+        return stream_cls(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME,
+                          device=device, callback=callback, extra_settings=extra)
+    except sd.PortAudioError as e:
+        kind = "microphone" if is_input else "speakers"
+        raise RuntimeError(f"Your {kind} '{info['name']}' ({api}) can't be opened for voice: {e}. "
+                           f"Pick a different device in the list.") from e
+
+
 class VoiceClient:
     """Network + audio engine. Thread-safe; the GUI/CLI polls `events` and the public state fields."""
 
@@ -420,10 +562,8 @@ class VoiceClient:
         threading.Thread(target=self.keepalive_loop, daemon=True).start()
         self.ptt.start()
         self._streams = [
-            sd.RawInputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME,
-                              device=self.input_device, callback=self.on_input),
-            sd.RawOutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME,
-                               device=self.output_device, callback=self.on_output),
+            open_stream(sd.RawInputStream, self.input_device, self.on_input),
+            open_stream(sd.RawOutputStream, self.output_device, self.on_output),
         ]
         for s in self._streams:
             s.start()
@@ -519,8 +659,18 @@ def run_gui(args, steam, steamid, detected_key):
     btn_connect = ttk.Button(conn, text="Connect", style="Accent.TButton")
     btn_connect.grid(row=1, column=3, padx=(16, 0))
     conn.columnconfigure(0, weight=1)
-    ttk.Label(conn, text="Get the server address and your token from game chat (type !voice).", style="Dim.TLabel")\
-        .grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+    auto_row = ttk.Frame(conn, style="Panel.TFrame")
+    auto_row.grid(row=2, column=0, columnspan=4, sticky="we", pady=(10, 0))
+    auto_var = tk.BooleanVar(value=args.netconport is not None or settings.get("auto", True))
+    ttk.Checkbutton(auto_row, text="Detect server and token from CS2", variable=auto_var).pack(side="left")
+    ttk.Label(auto_row, text="   console port", style="Dim.TLabel").pack(side="left")
+    e_netcon = ttk.Entry(auto_row, width=7)
+    e_netcon.insert(0, str(args.netconport or settings.get("netcon_port", DEFAULT_NETCON_PORT)))
+    e_netcon.pack(side="left", padx=(6, 0))
+    console_var = tk.StringVar(value="")
+    console_lbl = ttk.Label(conn, textvariable=console_var, style="Dim.TLabel", wraplength=700, justify="left")
+    console_lbl.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
     # audio panel
     audio = ttk.Frame(outer, style="Panel.TFrame", padding=12)
@@ -620,28 +770,40 @@ def run_gui(args, steam, steamid, detected_key):
         status_var.set(text)
         status_lbl.configure(foreground=color)
 
-    def connect():
-        if client["obj"]:
-            disconnect()
+    console = {"obj": None, "port": None}
+    # (relay, token) the user disconnected from, or that failed: don't auto-connect to it again
+    auto_hold = {"key": None}
+
+    def connect(auto=False):
+        if client["obj"] and not auto:
+            disconnect(manual=True)
             return
+
+        def fail(msg):
+            if auto:
+                write_log(msg)
+                auto_hold["key"] = (e_server.get().strip(), e_token.get().strip().upper())
+            else:
+                messagebox.showerror(APP_NAME, msg)
+
         server = e_server.get().strip()
         token = e_token.get().strip().upper()
         host, _, port = server.rpartition(":")
         if not host or not port.isdigit():
-            messagebox.showerror(APP_NAME, "Server must be host:port, e.g. 203.0.113.5:27030"); return
+            return fail("Server must be host:port, e.g. 203.0.113.5:27030")
         if len(token) != TOKEN_LEN:
-            messagebox.showerror(APP_NAME, f"The token is {TOKEN_LEN} characters; copy it from game chat (!voice)."); return
+            return fail(f"The token is {TOKEN_LEN} characters; copy it from game chat (!voice).")
         try:
             sid = int(e_steam.get().strip())
         except ValueError:
-            messagebox.showerror(APP_NAME, "SteamID must be a 17-digit SteamID64."); return
+            return fail("SteamID must be a 17-digit SteamID64.")
         key = e_key.get().strip().upper()
         if not openmic_var.get() and not PushToTalk.supported(key):
-            messagebox.showerror(APP_NAME, f"'{key}' is not a usable push-to-talk key. Try a letter, F-key, SPACE or MOUSE4/5."); return
+            return fail(f"'{key}' is not a usable push-to-talk key. Try a letter, F-key, SPACE or MOUSE4/5.")
         try:
             addr = (socket.gethostbyname(host), int(port))
         except OSError as e:
-            messagebox.showerror(APP_NAME, f"Can't resolve {host}: {e}"); return
+            return fail(f"Can't resolve {host}: {e}")
 
         ptt = PushToTalk(key or "V", toggle_var.get(), on_change=lambda on: root.after(0, tx_var.set, "● TRANSMITTING" if on else ""))
         c = VoiceClient(addr, sid, token, ptt, dev_index(cb_in), dev_index(cb_out), openmic_var.get())
@@ -649,17 +811,26 @@ def run_gui(args, steam, steamid, detected_key):
         try:
             c.start()
         except Exception as e:
-            messagebox.showerror(APP_NAME, f"Couldn't start audio: {e}")
-            c.close(); return
+            c.close()
+            return fail(f"Couldn't start audio: {e}")
         client["obj"] = c
+        client["key"] = (server, token)
         btn_connect.configure(text="Disconnect")
         set_status("● Linking…", accent)
-        save_settings({"server": server, "steamid": sid, "key": key, "toggle": toggle_var.get(),
-                       "open_mic": openmic_var.get(), "volume": vol_var.get(),
-                       "input": cb_in.get(), "output": cb_out.get()})
+        save_current(server=server, steamid=sid, key=key)
 
-    def disconnect():
+    def save_current(**extra):
+        data = load_settings()
+        data.update({"toggle": toggle_var.get(), "open_mic": openmic_var.get(), "volume": vol_var.get(),
+                     "input": cb_in.get(), "output": cb_out.get(), "auto": auto_var.get(),
+                     "netcon_port": e_netcon.get().strip()})
+        data.update(extra)
+        save_settings(data)
+
+    def disconnect(manual=False):
         c = client["obj"]
+        if manual and c:
+            auto_hold["key"] = client.get("key")
         if c:
             c.close()
             client["obj"] = None
@@ -682,7 +853,68 @@ def run_gui(args, steam, steamid, detected_key):
         else:
             c.local_mutes.add(sid); write_log(f"Muted {c.players.get(sid).name if sid in c.players else sid} (locally)")
 
+    def set_entry(entry, value):
+        if entry.get() != value:
+            entry.delete(0, "end")
+            entry.insert(0, value)
+
+    def auto_detect():
+        """Keep a GameConsole running while auto-detect is on and act on what it reports."""
+        port_text = e_netcon.get().strip()
+        port = int(port_text) if port_text.isdigit() and 0 < int(port_text) < 65536 else None
+        gc = console["obj"]
+        if not auto_var.get() or port is None:
+            if gc:
+                gc.close()
+                console["obj"] = None
+            console_var.set("" if auto_var.get() is False else "Enter the console port you set with -netconport.")
+            return
+        if gc is None or console["port"] != port:
+            if gc:
+                gc.close()
+            try:
+                my_sid = int(e_steam.get().strip())
+            except ValueError:
+                my_sid = None
+            gc = console["obj"] = GameConsole(port, my_sid)
+            console["port"] = port
+
+        state, in_game, game_server, relay, token, sid, relay_status = gc.snapshot()
+        if state != "connected":
+            console_var.set(f"Waiting for CS2's console on port {port}. Add  -netconport {port}  to CS2's launch "
+                            f"options in Steam (one-time), then start CS2.")
+            return
+        if not in_game:
+            console_var.set("CS2 found. Join a server and the server address and token will be filled in automatically.")
+            return
+        if not relay:
+            where = game_server or "this server"
+            console_var.set(f"CS2 is on {where}. Waiting for the CS2VoiceRelay plugin to answer "
+                            "(the server may not run it).")
+            return
+        console_var.set(f"CS2 is on {game_server or 'a server'}, relay {relay}. Server and token filled in from CS2.")
+
+        set_entry(e_server, relay)
+        set_entry(e_token, token)
+        if sid:
+            set_entry(e_steam, str(sid))
+        detected = (relay, token)
+        c = client["obj"]
+        if c is None:
+            if auto_hold["key"] != detected:
+                auto_hold["key"] = None
+                write_log(f"Detected {relay} from CS2; connecting")
+                connect(auto=True)
+        elif client.get("key") != detected:
+            write_log(f"CS2 moved to another server ({relay}); reconnecting")
+            disconnect()
+            connect(auto=True)
+
     def refresh():
+        try:
+            auto_detect()
+        except Exception as e:  # never let detection kill the UI loop
+            console_var.set(f"Auto-detect error: {e}")
         c = client["obj"]
         if c:
             while not c.events.empty():
@@ -722,9 +954,16 @@ def run_gui(args, steam, steamid, detected_key):
                     tree.delete(iid)
         root.after(100, refresh)
 
+    def on_close():
+        save_current()
+        disconnect()
+        if console["obj"]:
+            console["obj"].close()
+        root.destroy()
+
     btn_connect.configure(command=connect)
     tree.bind("<Double-1>", on_double_click)
-    root.protocol("WM_DELETE_WINDOW", lambda: (disconnect(), root.destroy()))
+    root.protocol("WM_DELETE_WINDOW", on_close)
     write_log(f"{APP_NAME} {APP_VERSION} ready. " + ("SteamID detected from Steam." if steamid else "Enter your SteamID64."))
     if args.server and args.token:
         root.after(200, connect)
@@ -735,36 +974,65 @@ def run_gui(args, steam, steamid, detected_key):
 # ----------------------------------------------------------------------------- CLI
 
 def run_cli(args, steam, steamid, key):
-    if not args.server:
-        sys.exit("--server host:port is required in --nogui mode")
-    host, _, port = args.server.rpartition(":")
-    if not host or not port.isdigit():
-        sys.exit("--server must be host:port")
-    if not steamid:
-        sys.exit("Couldn't find your SteamID in the Steam install; pass --steamid <steamid64>.")
     if not key and not args.open_mic:
         sys.exit("No +voicerecord bind found; pass --key (e.g. --key v) or --open-mic.")
-    token = (args.token or input("Token from game chat: ")).strip().upper()
-    if len(token) != TOKEN_LEN:
-        sys.exit(f"Token must be {TOKEN_LEN} characters.")
 
     def dev(v):
         return int(v) if v is not None and v.isdigit() else v
 
-    ptt = PushToTalk(key or "V", args.toggle, on_change=lambda on: print("mic", "ON" if on else "off"))
-    c = VoiceClient((socket.gethostbyname(host), int(port)), steamid, token, ptt,
-                    dev(args.input_device), dev(args.output_device), args.open_mic)
-    c.start()
+    def log(msg):
+        print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    def start(server, token, sid):
+        host, _, port = server.rpartition(":")
+        ptt = PushToTalk(key or "V", args.toggle, on_change=lambda on: print("mic", "ON" if on else "off"))
+        c = VoiceClient((socket.gethostbyname(host), int(port)), sid, token, ptt,
+                        dev(args.input_device), dev(args.output_device), args.open_mic)
+        c.start()
+        return c
+
+    gc = None
+    if not (args.server and args.token):
+        port = args.netconport or DEFAULT_NETCON_PORT
+        gc = GameConsole(port, steamid)
+        log(f"Waiting for CS2's console on port {port} (launch CS2 with  -netconport {port}) and a server running CS2VoiceRelay...")
+    else:
+        if not args.server.rpartition(":")[2].isdigit():
+            sys.exit("--server must be host:port")
+        if not steamid:
+            sys.exit("Couldn't find your SteamID in the Steam install; pass --steamid <steamid64>.")
+        if len(args.token.strip()) != TOKEN_LEN:
+            sys.exit(f"Token must be {TOKEN_LEN} characters.")
+
+    c, current = None, None
     print(f"{APP_NAME} {APP_VERSION}: push-to-talk {key or '(open mic)'}. Ctrl+C to quit.")
     try:
-        while not c.stop.is_set():
-            while not c.events.empty():
-                print(f"[{time.strftime('%H:%M:%S')}] {c.events.get()}")
+        while True:
+            if gc:
+                _, in_game, game_server, relay, token, sid, _ = gc.snapshot()
+                detected = (relay, token) if relay and token else None
+                if detected and detected != current:
+                    if c:
+                        log(f"CS2 moved to another server ({relay}); reconnecting")
+                        c.close()
+                    else:
+                        log(f"Detected {relay} from CS2 ({game_server})")
+                    c, current = start(relay, token, sid or steamid), detected
+            elif c is None:
+                c = start(args.server, args.token.strip().upper(), steamid)
+            if c:
+                while not c.events.empty():
+                    log(c.events.get())
+                if c.stop.is_set() and not gc:
+                    break
             time.sleep(0.2)
     except KeyboardInterrupt:
         pass
     finally:
-        c.close()
+        if c:
+            c.close()
+        if gc:
+            gc.close()
 
 
 def main():
@@ -778,6 +1046,8 @@ def main():
     ap.add_argument("--input-device", help="sounddevice input name or index")
     ap.add_argument("--output-device", help="sounddevice output name or index")
     ap.add_argument("--list-devices", action="store_true")
+    ap.add_argument("--netconport", type=int, help=f"CS2 console port for auto-detect (default {DEFAULT_NETCON_PORT}; "
+                                                    "launch CS2 with -netconport PORT)")
     ap.add_argument("--nogui", action="store_true", help="run in the terminal")
     args = ap.parse_args()
 

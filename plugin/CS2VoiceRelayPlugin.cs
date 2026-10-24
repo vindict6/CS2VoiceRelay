@@ -35,7 +35,7 @@ public class RelayConfig : BasePluginConfig
 public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 {
     public override string ModuleName => "CS2VoiceRelay";
-    public override string ModuleVersion => "1.0.2";
+    public override string ModuleVersion => "1.1.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Out-of-game voice relay that survives workshop map changes";
 
@@ -88,6 +88,8 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
                 var player = Utilities.GetPlayerFromSlot(slot);
                 if (_relay == null || player is not { IsValid: true, IsBot: false } || player.SteamID != id)
                     return;
+                // Always offer the token in the console, where the voice client picks it up automatically.
+                PrintRelayInfo(player);
                 if (!_relay.IsLinked(id))
                     SendConnectHint(player, token);
             });
@@ -96,8 +98,12 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         if (hotReload)
         {
             foreach (var player in Utilities.GetPlayers())
-                if (player is { IsValid: true, IsBot: false } && player.SteamID != 0)
-                    SendConnectHint(player, _relay.GetOrIssueToken(player.SteamID));
+            {
+                if (player is not { IsValid: true, IsBot: false } || player.SteamID == 0)
+                    continue;
+                PrintRelayInfo(player);
+                SendConnectHint(player, _relay.GetOrIssueToken(player.SteamID));
+            }
         }
     }
 
@@ -116,8 +122,36 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 
         var token = _relay.GetOrIssueToken(player.SteamID);
         SendConnectHint(player, token);
+        PrintRelayInfo(player);
         var linked = _relay.IsLinked(player.SteamID);
         player.PrintToChat($"{Config.ChatPrefix} Status: {(linked ? "\u0004linked" : "\u0002not linked")}\u0001, {_relay.LinkedCount} player(s) on the relay.");
+    }
+
+    /// <summary>
+    /// Quiet, console-only variant of !voice. The voice client runs this through CS2's
+    /// -netconport console and reads the reply to fill in the server and token itself.
+    /// </summary>
+    [ConsoleCommand("css_voicerelay", "Print your voice relay token and status to the console (used by the voice client)")]
+    [CommandHelper(minArgs: 0, usage: "", whoCanExecute: CommandUsage.CLIENT_ONLY)]
+    public void OnVoiceRelayInfoCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player is not { IsValid: true } || _relay == null || player.SteamID == 0)
+            return;
+        PrintRelayInfo(player);
+    }
+
+    /// <summary>
+    /// One machine-readable console line per player, parsed by client/voiceclient.py:
+    ///   CS2VoiceRelay relay=HOST:PORT token=XXXXXXXX steamid=7656... status=linked|unlinked proto=1
+    /// HOST is empty when PublicAddress isn't configured; the client then uses the game server's IP.
+    /// </summary>
+    private void PrintRelayInfo(CCSPlayerController player)
+    {
+        if (_relay == null)
+            return;
+        var token = _relay.GetOrIssueToken(player.SteamID);
+        var status = _relay.IsLinked(player.SteamID) ? "linked" : "unlinked";
+        player.PrintToConsole($"CS2VoiceRelay relay={Config.PublicAddress.Trim()}:{Config.Port} token={token} steamid={player.SteamID} status={status} proto=1");
     }
 
     private void SendConnectHint(CCSPlayerController player, string token)
