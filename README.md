@@ -72,10 +72,17 @@ Requires Metamod:Source 2.0 (dev build 1461 or later) and
 | `TapPort` | `27031` | Localhost UDP port between the Metamod tap and this plugin. The tap reads it from this file too and follows changes within 5 seconds; reload the plugin after changing it |
 | `SuppressGameVoiceForListeners` | `true` | Hold back in-game voice for players listening in a browser |
 | `TrustedProxies` | `[]` | Reverse proxies (IPs or CIDR ranges) whose `X-Forwarded-For` identifies the browser, e.g. `["127.0.0.1", "172.16.0.0/12"]` for a proxy on the same machine or in Docker. Empty means no proxy |
-| `AnnounceOnJoin` | `true` | Tell joining players about the page (at most once every few hours each) |
-| `MaxConnectionsPerIp` | `6` | Browser connections allowed per IP |
+| `MaxConnectionsPerIp` | `6` | Browser connections allowed per player IP |
+| `AnnounceOnJoin` | `true` | Show `JoinMessage` to players when they join. `false` (or an empty `JoinMessage`) turns the message off |
+| `JoinMessage` | `Can't hear anyone after a map change? Open {lightblue}{url}{default} in your browser.` | The chat message. `{url}` is the `PublicUrl` link, `{name}` the player's name; color tags such as `{green}`, `{gold}`, `{lightblue}`, `{red}` and `{default}` are CounterStrikeSharp's chat colors |
+| `JoinMessageIntervalMinutes` | `180` | Minimum minutes before the same player sees the message again. `0` shows it on every join and map change |
+| `ReminderIntervalMinutes` | `0` | Repeat the message every N minutes to players who aren't listening in a browser. `0` is off |
 
 Players can type `!voice` in chat to get the link again and see whether their browser is connected.
+
+Each listener's master volume and per-player volume/mute settings are saved on the server,
+keyed by their SteamID, in `configs/plugins/CS2VoiceRelay/voice_prefs.json`, so they follow the
+player to any browser. Settings a browser already had are uploaded the first time it links.
 
 Upgrading from 1.x: CounterStrikeSharp doesn't add new keys to an existing config, so delete
 `CS2VoiceRelay.json` once and reload the plugin to get the 2.0 settings. To change the web port,
@@ -101,10 +108,23 @@ the internet at all.
 
 ### Embedding the player in your own site
 
-To give the player your site's look, serve your own page at the proxied path (e.g. `/voice/`)
-and only proxy `/voice/ws`, `/voice/app.js` and `/voice/opus-decoder.min.js` to the plugin. Your
-page loads `opus-decoder.min.js` and `app.js` and provides the element ids listed at the top of
-[`plugin/web/app.js`](plugin/web/app.js); `plugin/web/index.html` is a complete example.
+The audio, linking and settings live in [`voice-engine.js`](plugin/web/voice-engine.js), which
+has no UI, so you can build the player into your own pages. Proxy `/voice/ws`,
+`/voice/voice-engine.js` and `/voice/opus-decoder.min.js` to the plugin, load the two scripts,
+and create an engine:
+
+```js
+const vr = CS2VoiceRelay.createEngine({ wsUrl: "/voice/ws" });
+vr.on("status", (s) => { /* s.phase: connecting | waiting | choose | linked | reconnecting */ });
+vr.on("state", (st) => { /* st.players: [{ id, name, team, alive }] */ });
+button.onclick = () => vr.start();          // audio needs a click first
+vr.setPlayer(steamId, { vol: 50 });         // saved on the server for this listener
+vr.isSpeaking(steamId);
+```
+
+The full API is listed at the top of `voice-engine.js`. The bundled page
+([`plugin/web/index.html`](plugin/web/index.html) with [`app.js`](plugin/web/app.js)) is
+built the same way.
 
 ## Notes and limitations
 

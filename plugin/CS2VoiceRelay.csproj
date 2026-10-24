@@ -20,6 +20,7 @@
     <!-- The browser player is served straight from the plugin DLL -->
     <EmbeddedResource Include="web\index.html" />
     <EmbeddedResource Include="web\app.js" />
+    <EmbeddedResource Include="web\voice-engine.js" />
     <EmbeddedResource Include="web\opus-decoder.min.js" />
   </ItemGroup>
 </Project>

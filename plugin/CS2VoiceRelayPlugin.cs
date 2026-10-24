@@ -6,6 +6,7 @@ using CounterStrikeSharp.API.Core.Attributes.Registration;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Timers;
+using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 
 namespace CS2VoiceRelay;
@@ -26,9 +27,20 @@ public class RelayConfig : BasePluginConfig
     /// ["127.0.0.1", "172.16.0.0/12"] for a proxy on this machine or in Docker. Empty: no proxy.
     /// </summary>
     [JsonPropertyName("TrustedProxies")] public List<string> TrustedProxies { get; set; } = new();
-    [JsonPropertyName("AnnounceOnJoin")] public bool AnnounceOnJoin { get; set; } = true;
     [JsonPropertyName("MaxConnectionsPerIp")] public int MaxConnectionsPerIp { get; set; } = 6;
     [JsonPropertyName("ChatPrefix")] public string ChatPrefix { get; set; } = " \u0004[Voice]\u0001";
+
+    /// <summary>Show JoinMessage to players when they join. false (or an empty JoinMessage) turns it off.</summary>
+    [JsonPropertyName("AnnounceOnJoin")] public bool AnnounceOnJoin { get; set; } = true;
+    /// <summary>
+    /// Chat message about the voice page. {url} is the PublicUrl link, {name} the player's name;
+    /// color tags like {green}, {gold}, {lightblue} or {default} use CounterStrikeSharp's chat colors.
+    /// </summary>
+    [JsonPropertyName("JoinMessage")] public string JoinMessage { get; set; } = "Can't hear anyone after a map change? Open {lightblue}{url}{default} in your browser.";
+    /// <summary>Minimum minutes before the same player sees JoinMessage again. 0: on every join and map change.</summary>
+    [JsonPropertyName("JoinMessageIntervalMinutes")] public int JoinMessageIntervalMinutes { get; set; } = 180;
+    /// <summary>Repeat JoinMessage every N minutes to players who aren't listening in a browser. 0: off.</summary>
+    [JsonPropertyName("ReminderIntervalMinutes")] public int ReminderIntervalMinutes { get; set; } = 0;
 }
 
 /// <summary>
@@ -41,7 +53,7 @@ public class RelayConfig : BasePluginConfig
 public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 {
     public override string ModuleName => "CS2VoiceRelay";
-    public override string ModuleVersion => "2.0.0";
+    public override string ModuleVersion => "2.1.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Hear in-game voice in your browser when CS2's voice playback breaks";
 
@@ -49,6 +61,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 
     private WebServer? _web;
     private TapLink? _tap;
+    private PrefsStore? _prefs;
     private volatile ServerSnapshot _snapshot = ServerSnapshot.Empty;
     private readonly Dictionary<ulong, DateTime> _announced = new();
     private ConVar? _cvHostname, _cvIp;
@@ -63,6 +76,8 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         if (!IPAddress.TryParse(config.BindAddress, out _))
             throw new Exception($"BindAddress '{config.BindAddress}' is not an IP address");
         config.MaxConnectionsPerIp = Math.Clamp(config.MaxConnectionsPerIp, 1, 64);
+        config.JoinMessageIntervalMinutes = Math.Max(0, config.JoinMessageIntervalMinutes);
+        config.ReminderIntervalMinutes = Math.Max(0, config.ReminderIntervalMinutes);
         foreach (var entry in config.TrustedProxies)
             if (!TryParseNetwork(entry, out _))
                 throw new Exception($"TrustedProxies entry '{entry}' is not an IP address or CIDR range");
@@ -82,6 +97,11 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 
     public override void Load(bool hotReload)
     {
+        // Next to CS2VoiceRelay.json: addons/counterstrikesharp/configs/plugins/CS2VoiceRelay/
+        var prefsPath = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", "CS2VoiceRelay", "voice_prefs.json"));
+        _prefs = new PrefsStore(prefsPath, Logger);
+        _prefs.Load();
+
         _web = new WebServer(
             new WebSettings
             {
@@ -92,6 +112,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
             },
             () => _snapshot,
             SendCodeToPlayer,
+            _prefs,
             ModuleVersion,
             Logger);
         _tap = new TapLink(Config.TapPort, OnTapVoice, Logger);
@@ -102,10 +123,13 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         AddTimer(0.5f, PushSuppressMask, TimerFlags.REPEAT);
         AddTimer(1.0f, () => _web?.Tick(), TimerFlags.REPEAT);
         AddTimer(10f, CheckTap, TimerFlags.REPEAT);
+        AddTimer(5f, () => _prefs?.FlushAsync(), TimerFlags.REPEAT);
+        if (Config.ReminderIntervalMinutes > 0)
+            AddTimer(Config.ReminderIntervalMinutes * 60f, SendReminders, TimerFlags.REPEAT);
 
         RegisterListener<Listeners.OnClientPutInServer>(slot =>
         {
-            if (!Config.AnnounceOnJoin)
+            if (!Config.AnnounceOnJoin || string.IsNullOrWhiteSpace(Config.JoinMessage))
                 return;
             // Chat isn't visible yet while the player is still loading in.
             AddTimer(10f, () =>
@@ -113,17 +137,47 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
                 var player = Utilities.GetPlayerFromSlot(slot);
                 if (player is not { IsValid: true, IsBot: false } || player.SteamID == 0)
                     return;
-                // Once per player every few hours, not on every map change
-                if (_announced.TryGetValue(player.SteamID, out var when) && DateTime.UtcNow - when < TimeSpan.FromHours(3))
+                var interval = TimeSpan.FromMinutes(Config.JoinMessageIntervalMinutes);
+                if (_announced.TryGetValue(player.SteamID, out var when) && DateTime.UtcNow - when < interval)
                     return;
                 _announced[player.SteamID] = DateTime.UtcNow;
-                player.PrintToChat($"{Config.ChatPrefix} Can't hear anyone after a map change? Open \u0003{PlayerUrl()}\u0001 in your browser.");
+                player.PrintToChat(FormatJoinMessage(player));
             });
         });
     }
 
+    private void SendReminders()
+    {
+        if (_web == null || string.IsNullOrWhiteSpace(Config.JoinMessage))
+            return;
+        var listening = _web.ListeningSteamIds();
+        foreach (var player in Utilities.GetPlayers())
+            if (player is { IsValid: true, IsBot: false } && player.SteamID != 0 && !listening.Contains(player.SteamID))
+                player.PrintToChat(FormatJoinMessage(player));
+    }
+
+    private static readonly Dictionary<string, string> ChatColorTags = BuildChatColorTags();
+
+    private static Dictionary<string, string> BuildChatColorTags()
+    {
+        var tags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var field in typeof(ChatColors).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+            if (field.FieldType == typeof(char) && field.GetValue(null) is char c)
+                tags.TryAdd("{" + field.Name + "}", c.ToString());
+        return tags;
+    }
+
+    private string FormatJoinMessage(CCSPlayerController player)
+    {
+        var text = Config.JoinMessage.Replace("{url}", PlayerUrl()).Replace("{name}", player.PlayerName);
+        foreach (var (tag, code) in ChatColorTags)
+            text = text.Replace(tag, code, StringComparison.OrdinalIgnoreCase);
+        return $"{Config.ChatPrefix} {text}";
+    }
+
     public override void Unload(bool hotReload)
     {
+        _prefs?.FlushAsync().Wait(TimeSpan.FromSeconds(2));
         _tap?.SendSuppressMask(0, 0);
         _tap?.Dispose();
         _web?.Dispose();

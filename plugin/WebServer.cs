@@ -65,6 +65,7 @@ public sealed class WebServer : IDisposable
     private readonly ILogger _log;
     private readonly Func<ServerSnapshot> _snapshot;
     private readonly Action<ulong, string> _sendCodeToPlayer;
+    private readonly PrefsStore _prefs;
     private readonly string _version;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _cts = new();
@@ -74,17 +75,19 @@ public sealed class WebServer : IDisposable
     private int _nextId;
     private Task? _acceptLoop;
 
-    public WebServer(WebSettings settings, Func<ServerSnapshot> snapshot, Action<ulong, string> sendCodeToPlayer, string version, ILogger log)
+    public WebServer(WebSettings settings, Func<ServerSnapshot> snapshot, Action<ulong, string> sendCodeToPlayer, PrefsStore prefs, string version, ILogger log)
     {
         _settings = settings;
         _snapshot = snapshot;
         _sendCodeToPlayer = sendCodeToPlayer;
+        _prefs = prefs;
         _version = version;
         _log = log;
         _listener = new TcpListener(IPAddress.Parse(settings.BindAddress), settings.Port);
 
         LoadFile("/", "index.html", "text/html; charset=utf-8");
         LoadFile("/app.js", "app.js", "text/javascript; charset=utf-8");
+        LoadFile("/voice-engine.js", "voice-engine.js", "text/javascript; charset=utf-8");
         LoadFile("/opus-decoder.min.js", "opus-decoder.min.js", "text/javascript; charset=utf-8");
     }
 
@@ -180,8 +183,29 @@ public sealed class WebServer : IDisposable
         s.PendingCode = null;
         s.LastIdentify = "bound";
         s.SendJson(new { t = "bound", id = p.SteamId.ToString(), name = p.Name });
+        SendPrefs(s);
         _log.LogInformation("Web player linked to {Name} ({SteamId}) from {Address}", p.Name, p.SteamId, s.Address);
     }
+
+    /// <summary>The listener's saved volume settings; "empty" tells the browser to upload its own.</summary>
+    private void SendPrefs(Session s)
+    {
+        var p = _prefs.Get(s.SteamId);
+        s.SendJson(new
+        {
+            t = "prefs",
+            empty = p == null,
+            master = p?.Master ?? 100,
+            masterMuted = p?.MasterMuted ?? false,
+            players = p?.Players ?? new Dictionary<string, PlayerPref>(),
+        });
+    }
+
+    private static int? ReadInt(JsonElement m, string name) =>
+        m.TryGetProperty(name, out var e) && e.ValueKind == JsonValueKind.Number && e.TryGetInt32(out var v) ? v : null;
+
+    private static bool? ReadBool(JsonElement m, string name) =>
+        m.TryGetProperty(name, out var e) && (e.ValueKind == JsonValueKind.True || e.ValueKind == JsonValueKind.False) ? e.GetBoolean() : null;
 
     private void HandleClientMessage(Session s, JsonElement m)
     {
@@ -191,6 +215,34 @@ public sealed class WebServer : IDisposable
         {
             case "ready":
                 s.Ready = m.TryGetProperty("on", out var on) && on.ValueKind == JsonValueKind.True;
+                break;
+
+            case "pref":
+                // A single change: master volume/mute, or one speaker's volume/mute
+                if (s.SteamId == 0)
+                    return;
+                if (m.TryGetProperty("id", out var speakerEl) && ulong.TryParse(speakerEl.GetString(), out var speaker))
+                    _prefs.SetPlayer(s.SteamId, speaker, ReadInt(m, "vol") ?? 100, ReadBool(m, "muted") ?? false);
+                else
+                    _prefs.SetMaster(s.SteamId, ReadInt(m, "master"), ReadBool(m, "masterMuted"));
+                break;
+
+            case "prefs_set":
+                // One-time upload of what this browser had before settings were saved server-side
+                if (s.SteamId == 0 || _prefs.Get(s.SteamId) != null)
+                    return;
+                var players = new List<(ulong, int, bool)>();
+                if (m.TryGetProperty("players", out var playersEl) && playersEl.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var entry in playersEl.EnumerateObject())
+                    {
+                        if (players.Count >= PrefsStore.MaxPlayersPerListener)
+                            break;
+                        if (ulong.TryParse(entry.Name, out var sid) && entry.Value.ValueKind == JsonValueKind.Object)
+                            players.Add((sid, ReadInt(entry.Value, "vol") ?? 100, ReadBool(entry.Value, "muted") ?? false));
+                    }
+                }
+                _prefs.Replace(s.SteamId, ReadInt(m, "master") ?? 100, ReadBool(m, "masterMuted") ?? false, players);
                 break;
 
             case "choose":
@@ -397,17 +449,34 @@ public sealed class WebServer : IDisposable
             session.SendJson(new { t = "hello", version = _version });
             Identify(session, _snapshot());
 
-            var buf = new byte[4096];
+            // Messages are small, except a one-time settings upload; assemble up to 64 KB
+            const int maxMessage = 64 * 1024;
+            var buf = new byte[maxMessage];
+            var len = 0;
+            var oversized = false;
             while (ws.State == WebSocketState.Open && !done.IsCancellationRequested)
             {
-                var result = await ws.ReceiveAsync(buf, done.Token);
+                var result = await ws.ReceiveAsync(buf.AsMemory(len), done.Token);
                 if (result.MessageType == WebSocketMessageType.Close)
                     break;
-                if (result.MessageType != WebSocketMessageType.Text || !result.EndOfMessage || result.Count == 0)
+                len += result.Count;
+                if (len == buf.Length && !result.EndOfMessage)
+                {
+                    oversized = true;
+                    len = 0;
+                }
+                if (!result.EndOfMessage)
+                    continue;
+
+                var count = len;
+                var skip = oversized || result.MessageType != WebSocketMessageType.Text || count == 0;
+                len = 0;
+                oversized = false;
+                if (skip)
                     continue;
                 try
                 {
-                    using var doc = JsonDocument.Parse(buf.AsMemory(0, result.Count));
+                    using var doc = JsonDocument.Parse(buf.AsMemory(0, count));
                     HandleClientMessage(session, doc.RootElement);
                 }
                 catch (JsonException) { }
