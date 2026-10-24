@@ -158,6 +158,7 @@
     const vr = window.CS2VoiceRelay.createEngine({ wsUrl: ws.href });
     let me = null;
     let online = false;
+    let testUntil = 0;   // keep the !testvoice message up while the chime plays
 
     function refresh() {
       go.disabled = !(me && online) && !vr.listening;
@@ -165,7 +166,7 @@
       if (vr.listening) go.dataset.on = ""; else delete go.dataset.on;
       if (vr.listening) { pill.textContent = "Listening"; pill.dataset.s = "ok"; }
       else if (me) { pill.textContent = online ? "Ready" : "Not in game"; delete pill.dataset.s; }
-      if (me) msg.textContent = !online ? "Join the server to listen." : vr.listening
+      if (me && Date.now() > testUntil) msg.textContent = !online ? "Join the server to listen." : vr.listening
         ? "Listening. Keep this tab open while you play." : "Click Start listening to hear voice chat here.";
       const m = vr.getMaster();
       if (document.activeElement !== volRange) volRange.value = String(m.volume);
@@ -215,6 +216,10 @@
       for (const li of list.children) syncRow(li);
     });
     vr.on("listening", refresh);
+    vr.on("test", () => {
+      testUntil = Date.now() + 6000;
+      msg.textContent = "Test chime from !testvoice. If you heard it, voice is working.";
+    });
 
     go.onclick = () => (vr.listening ? vr.stop() : vr.start());
     volRange.oninput = () => vr.setMaster({ volume: Number(volRange.value) });

@@ -11,6 +11,7 @@
 //                               st.tournament (server in tournament mode), st.allVoice (you hear every player)
 //   vr.getSolo() -> 0 | 2 | 3;  vr.setSolo(team)   with allVoice: hear everyone (0), only T (2) or only CT (3)
 //   vr.on("prefs", () => ...)   volume settings changed (from the server or this page)
+//   vr.on("test", () => ...)    the player typed !testvoice: a test chime is about to play
 //   vr.on("listening", on => ...), vr.on("code_sent", name => ...), vr.on("code_result", msg => ...)
 //   await vr.start()            call from a click: browsers only allow audio after a user gesture
 //   vr.stop(); vr.choose(id); vr.submitCode(code)
@@ -220,6 +221,9 @@
           break;
         case "prefs":
           onServerPrefs(m);
+          break;
+        case "test":
+          emit("test");
           break;
         case "state":
           engine.state = {

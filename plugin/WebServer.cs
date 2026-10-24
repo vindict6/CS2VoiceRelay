@@ -28,6 +28,8 @@ public sealed class ServerSnapshot
     public ScoreBoard Board { get; init; } = ScoreBoard.Empty;
 }
 
+public enum TestSoundResult { NoPage, NotListening, Playing }
+
 public sealed class WebSettings
 {
     public string BindAddress = "0.0.0.0";
@@ -200,6 +202,77 @@ public sealed class WebServer : IDisposable
     }
 
     private readonly string _logoUrl;
+
+    /// <summary>The !testvoice chime, ready to send: browser voice packets from speaker 0, three 20 ms frames each.</summary>
+    private readonly List<byte[]> _testSound = LoadTestSound();
+
+    private static List<byte[]> LoadTestSound()
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var name = asm.GetManifestResourceNames().First(n => n.EndsWith(".test-chime.bin", StringComparison.Ordinal));
+        using var s = asm.GetManifestResourceStream(name)!;
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        var bytes = ms.ToArray();
+
+        var frames = new List<byte[]>();
+        for (var pos = 0; pos + 2 <= bytes.Length;)
+        {
+            int len = BitConverter.ToUInt16(bytes, pos);
+            pos += 2;
+            frames.Add(bytes[pos..(pos + len)]);
+            pos += len;
+        }
+
+        var packets = new List<byte[]>();
+        for (var i = 0; i < frames.Count; i += 3)
+        {
+            var group = frames.Skip(i).Take(3).ToList();
+            var dataLen = group.Sum(f => f.Length);
+            var packet = new byte[16 + group.Count * 4 + dataLen];
+            packet[0] = 1;                                                     // voice
+            // bytes 1..8: speaker xuid 0, the server itself
+            packet[9] = 2;                                                     // Opus
+            BitConverter.TryWriteBytes(packet.AsSpan(10), 48000u);
+            BitConverter.TryWriteBytes(packet.AsSpan(14), (ushort)group.Count);
+            int end = 0, at = 16 + group.Count * 4;
+            for (var k = 0; k < group.Count; k++)
+            {
+                end += group[k].Length;
+                BitConverter.TryWriteBytes(packet.AsSpan(16 + k * 4), (uint)end);  // end offsets
+                group[k].CopyTo(packet, at);
+                at += group[k].Length;
+            }
+            packets.Add(packet);
+        }
+        return packets;
+    }
+
+    /// <summary>
+    /// !testvoice: play the chime on this player's listening pages, through the same Opus path as
+    /// real voice, paced like a speaker. Says why not when there's no page or it isn't listening.
+    /// </summary>
+    public TestSoundResult SendTestSound(ulong steamId)
+    {
+        var mine = _sessions.Values.Where(s => s.SteamId == steamId).ToList();
+        if (mine.Count == 0)
+            return TestSoundResult.NoPage;
+        var listening = mine.Where(s => s.Ready).ToList();
+        if (listening.Count == 0)
+            return TestSoundResult.NotListening;
+        foreach (var s in listening)
+            s.SendJson(new { t = "test" });
+        _ = Task.Run(async () =>
+        {
+            foreach (var packet in _testSound)
+            {
+                foreach (var s in listening)
+                    s.Send(packet, WebSocketMessageType.Binary);
+                await Task.Delay(60);
+            }
+        });
+        return TestSoundResult.Playing;
+    }
 
     private static string TextOn(string hex)
     {

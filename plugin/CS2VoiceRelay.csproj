@@ -23,5 +23,7 @@
     <EmbeddedResource Include="web\voice-engine.js" />
     <EmbeddedResource Include="web\opus-decoder.min.js" />
     <EmbeddedResource Include="web\widget.js" />
+    <!-- !testvoice chime: 20 ms Opus frames, [u16 length][frame] each -->
+    <EmbeddedResource Include="sounds\test-chime.bin" />
   </ItemGroup>
 </Project>

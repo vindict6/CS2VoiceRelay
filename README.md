@@ -96,7 +96,10 @@ You need Metamod:Source 2.0 (dev build 1461 or later) and
    `addons/counterstrikesharp/configs/plugins/CS2VoiceRelay/CS2VoiceRelay.json`. At least set
    `PublicUrl` so the link players see in chat is right.
 
-Players can type `!voice` in chat to get the link again and see if their browser is connected.
+Players can type `!voice` in chat to get the link again and see if their browser is connected,
+and `!testvoice` to play a short chime on their voice page. The chime goes through the same path
+as real voice, so if they hear it, everything works. If they don't, the chat reply says why: no
+page linked to them yet, or the page isn't listening.
 
 ## Config
 

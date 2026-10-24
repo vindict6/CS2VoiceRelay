@@ -99,7 +99,7 @@ public class RelayConfig : BasePluginConfig
 public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 {
     public override string ModuleName => "CS2VoiceRelay";
-    public override string ModuleVersion => "2.4.0";
+    public override string ModuleVersion => "2.5.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Hear in-game voice in your browser when CS2's voice playback breaks";
 
@@ -111,6 +111,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
     private volatile ServerSnapshot _snapshot = ServerSnapshot.Empty;
     private readonly Dictionary<ulong, DateTime> _announced = new();
     private readonly ScoreTracker _scores = new();
+    private readonly Dictionary<ulong, DateTime> _lastTestSound = new();
     private ConVar? _cvHostname, _cvIp;
     private bool _warnedTap;
     private Thread? _worker;
@@ -416,6 +417,25 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         var tap = _tap?.TapAlive == true ? "" : "  \u0002(voice tap not running)\u0001";
         var you = player != null ? $"  You: {(listening ? "\u0004listening" : "not connected")}\u0001" : "";
         command.ReplyToCommand($"{Prefix} Browser voice: \u0003{PlayerUrl()}\u0001{you}{tap}");
+    }
+
+    [ConsoleCommand("css_testvoice", "Play a test chime on your browser voice page")]
+    [CommandHelper(minArgs: 0, usage: "", whoCanExecute: CommandUsage.CLIENT_ONLY)]
+    public void OnTestVoiceCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player is not { IsValid: true } || player.SteamID == 0 || _web == null)
+            return;
+        if (_lastTestSound.TryGetValue(player.SteamID, out var last) && DateTime.UtcNow - last < TimeSpan.FromSeconds(3))
+            return;
+        _lastTestSound[player.SteamID] = DateTime.UtcNow;
+
+        var text = _web.SendTestSound(player.SteamID) switch
+        {
+            TestSoundResult.Playing => "Playing a test chime on your voice page. If you hear it, browser voice is working.",
+            TestSoundResult.NotListening => "Your voice page is open but not listening. Click \u0004Start listening\u0001 there, then try !testvoice again.",
+            _ => $"No voice page is linked to you yet. Open \u0003{PlayerUrl()}\u0001 in your browser, then try !testvoice again.",
+        };
+        command.ReplyToCommand($"{Prefix} {text}");
     }
 
     private string PlayerUrl()

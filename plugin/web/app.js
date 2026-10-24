@@ -327,4 +327,8 @@
   });
 
   $("listen").onclick = () => (vr.listening ? vr.stop() : vr.start());
+
+  vr.on("test", () => {
+    $("listen-hint").textContent = "Test chime from !testvoice. If you heard it, browser voice is working.";
+  });
 })();
