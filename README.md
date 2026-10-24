@@ -69,13 +69,17 @@ Requires Metamod:Source 2.0 (dev build 1461 or later) and
 | `Port` | `27030` | TCP port of the web page |
 | `BindAddress` | `0.0.0.0` | Interface to listen on |
 | `PublicUrl` | `""` | Link shown to players, e.g. `http://example.com:27030` (default: `http://SERVER-IP:Port`) |
-| `TapPort` | `27031` | Localhost UDP port the Metamod tap sends to. If you change it, also start the server with the environment variable `CS2VR_TAP_PORT` set to the same port |
+| `TapPort` | `27031` | Localhost UDP port between the Metamod tap and this plugin. The tap reads it from this file too and follows changes within 5 seconds; reload the plugin after changing it |
 | `SuppressGameVoiceForListeners` | `true` | Hold back in-game voice for players listening in a browser |
 | `TrustForwardedFor` | `false` | Behind a reverse proxy on the same machine, use its `X-Forwarded-For` to identify players |
 | `AnnounceOnJoin` | `true` | Tell joining players about the page (at most once every few hours each) |
 | `MaxConnectionsPerIp` | `6` | Browser connections allowed per IP |
 
 Players can type `!voice` in chat to get the link again and see whether their browser is connected.
+
+Upgrading from 1.x: CounterStrikeSharp doesn't add new keys to an existing config, so delete
+`CS2VoiceRelay.json` once and reload the plugin to get the 2.0 settings. To change the web port,
+change `Port` and open the new TCP port in the firewall.
 
 ### Behind a reverse proxy
 

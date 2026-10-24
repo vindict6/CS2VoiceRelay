@@ -41,6 +41,8 @@
 #include <string.h>
 #include <atomic>
 #include <chrono>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include "extension.h"
@@ -102,7 +104,9 @@ KHook::Virtual<CServerSideClientBase, bool, const CNetMessage*, NetChannelBufTyp
 // tap -> plugin   "CVT1" voice packet (see BuildVoicePacket), "CVH1" heartbeat
 // plugin -> tap   "CVC1" u64 suppress mask (bit = player slot), u32 valid_ms
 static tap_socket_t g_socket = TAP_INVALID_SOCKET;
-static sockaddr_in g_relayAddr;
+static std::atomic<uint16_t> g_relayPort{DEFAULT_RELAY_PORT};
+static std::string g_configPath;   // CounterStrikeSharp config of the CS2VoiceRelay plugin
+static bool g_portFromEnv = false;
 static std::atomic<bool> g_running{false};
 static std::thread g_controlThread;
 static std::atomic<uint64_t> g_suppressMask{0};
@@ -118,13 +122,73 @@ static void SendToRelay(const uint8_t* data, size_t len)
 {
 	if (g_socket == TAP_INVALID_SOCKET)
 		return;
-	sendto(g_socket, (const char*)data, (int)len, 0, (const sockaddr*)&g_relayAddr, sizeof(g_relayAddr));
+	sockaddr_in to = {};
+	to.sin_family = AF_INET;
+	to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	to.sin_port = htons(g_relayPort.load(std::memory_order_relaxed));
+	sendto(g_socket, (const char*)data, (int)len, 0, (const sockaddr*)&to, sizeof(to));
+}
+
+// The port lives in one place: "TapPort" in the CS2VoiceRelay plugin's own config,
+// addons/counterstrikesharp/configs/plugins/CS2VoiceRelay/CS2VoiceRelay.json.
+// Returns 0 if the file or key isn't there.
+static uint16_t ReadConfigPort()
+{
+	if (g_configPath.empty())
+		return 0;
+	std::ifstream in(g_configPath);
+	if (!in)
+		return 0;
+	std::stringstream ss;
+	ss << in.rdbuf();
+	const std::string text = ss.str();
+
+	size_t pos = text.find("\"TapPort\"");
+	if (pos == std::string::npos)
+		return 0;
+	pos = text.find(':', pos);
+	if (pos == std::string::npos)
+		return 0;
+	pos++;
+	while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t'))
+		pos++;
+	long value = 0;
+	int digits = 0;
+	while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9' && digits < 6)
+	{
+		value = value * 10 + (text[pos++] - '0');
+		digits++;
+	}
+	return (digits > 0 && value > 0 && value < 65536) ? (uint16_t)value : 0;
+}
+
+// CS2VR_TAP_PORT (environment) > TapPort in the plugin config > 27031
+static uint16_t ResolvePort(const char** source)
+{
+	if (const char* env = getenv("CS2VR_TAP_PORT"))
+	{
+		int p = atoi(env);
+		if (p > 0 && p < 65536)
+		{
+			g_portFromEnv = true;
+			*source = "CS2VR_TAP_PORT";
+			return (uint16_t)p;
+		}
+	}
+	if (uint16_t p = ReadConfigPort())
+	{
+		*source = "CS2VoiceRelay.json";
+		return p;
+	}
+	*source = "default";
+	return DEFAULT_RELAY_PORT;
 }
 
 static void ControlLoop()
 {
 	uint8_t buf[64];
 	int64_t nextHeartbeat = 0;
+	int64_t nextConfigCheck = NowMs() + 5000;
 	while (g_running.load())
 	{
 		int64_t now = NowMs();
@@ -133,6 +197,20 @@ static void ControlLoop()
 			// Lets the plugin learn our port even while nobody is talking
 			SendToRelay((const uint8_t*)"CVH1", 4);
 			nextHeartbeat = now + 1000;
+		}
+
+		// Follow TapPort changes in the plugin config without a restart
+		if (!g_portFromEnv && now >= nextConfigCheck)
+		{
+			nextConfigCheck = now + 5000;
+			uint16_t port = ReadConfigPort();
+			if (port == 0)
+				port = DEFAULT_RELAY_PORT;
+			if (port != g_relayPort.load())
+			{
+				g_relayPort.store(port);
+				ConMsg("[CS2VoiceRelayTap] TapPort changed; forwarding voice to 127.0.0.1:%u\n", port);
+			}
 		}
 
 		sockaddr_in from;
@@ -169,13 +247,9 @@ static bool OpenLink(char* error, size_t maxlen)
 		return false;
 	}
 #endif
-	uint16_t port = DEFAULT_RELAY_PORT;
-	if (const char* env = getenv("CS2VR_TAP_PORT"))
-	{
-		int p = atoi(env);
-		if (p > 0 && p < 65536)
-			port = (uint16_t)p;
-	}
+	const char* source = "default";
+	uint16_t port = ResolvePort(&source);
+	g_relayPort.store(port);
 
 	g_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (g_socket == TAP_INVALID_SOCKET)
@@ -205,14 +279,9 @@ static bool OpenLink(char* error, size_t maxlen)
 	setsockopt(g_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 #endif
 
-	memset(&g_relayAddr, 0, sizeof(g_relayAddr));
-	g_relayAddr.sin_family = AF_INET;
-	g_relayAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	g_relayAddr.sin_port = htons(port);
-
 	g_running.store(true);
 	g_controlThread = std::thread(ControlLoop);
-	ConMsg("[CS2VoiceRelayTap] forwarding voice to 127.0.0.1:%u\n", port);
+	ConMsg("[CS2VoiceRelayTap] forwarding voice to 127.0.0.1:%u (port from %s)\n", port, source);
 	return true;
 }
 
@@ -414,6 +483,8 @@ bool CS2VoiceRelayTap::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxl
 	GET_V_IFACE_CURRENT(GetEngineFactory, Interfaces::icvar, ICvar, CVAR_INTERFACE_VERSION);
 	GET_V_IFACE_ANY(GetServerFactory, Interfaces::server, IServerGameDLL, INTERFACEVERSION_SERVERGAMEDLL);
 	GET_V_IFACE_ANY(GetServerFactory, Interfaces::gameclients, IServerGameClients, INTERFACEVERSION_SERVERGAMECLIENTS);
+
+	g_configPath = std::string(ismm->GetBaseDir()) + "/addons/counterstrikesharp/configs/plugins/CS2VoiceRelay/CS2VoiceRelay.json";
 
 	if (!OpenLink(error, maxlen))
 		return false;
