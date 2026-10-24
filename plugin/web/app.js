@@ -1,6 +1,15 @@
 // CS2VoiceRelay browser player. Receives the Opus voice packets the server would have sent
 // your game, decodes them with opus-decoder (WebAssembly, works on plain http) and plays
 // them through Web Audio. Volume settings are kept in localStorage.
+//
+// The script can be embedded in another site's page. It connects to "ws" next to the page's
+// URL (e.g. /voice/ -> /voice/ws) and only needs elements with these ids:
+//   conn, identify-none, your-ip, identify-choose, choices, code-row, code, code-go,
+//   code-hint, code-error, main, offline, host, map, me, listen, master, master-value,
+//   master-mute, listen-hint, players, version
+// It toggles the class "hidden" to show and hide sections, sets data-state="ok|warn|bad" on
+// #conn and data-listening on #listen, and builds player rows from the classes player,
+// team-N, dead, self, speaking, dot, name, name-text, value, pbtn, ctl, on.
 (() => {
   "use strict";
 
@@ -38,10 +47,10 @@
     return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + base + "ws";
   }
 
-  function setConn(text, cls) {
+  function setConn(text, state) {
     const el = $("conn");
     el.textContent = text;
-    el.className = "pill " + (cls || "");
+    el.dataset.state = state || "";
   }
 
   function connect() {
@@ -197,7 +206,7 @@
       savePref(id, { vol: Number(slider.value), muted: cur.muted });
     };
     const mute = document.createElement("button");
-    mute.className = "icon ctl" + (p.muted ? " on" : "");
+    mute.className = "pbtn ctl" + (p.muted ? " on" : "");
     mute.textContent = p.muted ? "Off" : "On";
     mute.title = "Mute this player";
     mute.onclick = () => {
@@ -261,6 +270,7 @@
     st.listening = true;
     send({ t: "ready", on: true });
     $("listen").textContent = "Stop listening";
+    $("listen").dataset.listening = "true";
     $("listen").classList.remove("primary");
     $("listen-hint").textContent = "Listening. You can switch back to CS2; this tab keeps playing in the background.";
     updateConn();
@@ -271,6 +281,7 @@
     send({ t: "ready", on: false });
     for (const s of st.speakers.values()) s.nextTime = 0;
     $("listen").textContent = "Start listening";
+    delete $("listen").dataset.listening;
     $("listen").classList.add("primary");
     $("listen-hint").textContent = "In-game voice comes back within a couple of seconds after you stop.";
     updateConn();

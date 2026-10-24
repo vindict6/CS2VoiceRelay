@@ -28,7 +28,8 @@ public sealed class WebSettings
 {
     public string BindAddress = "0.0.0.0";
     public int Port = 27030;
-    public bool TrustForwardedFor;
+    /// <summary>Reverse proxies whose X-Forwarded-For is believed. Empty: use the socket address.</summary>
+    public List<IPNetwork> TrustedProxies = new();
     public int MaxConnections = 256;
     public int MaxConnectionsPerIp = 6;
 }
@@ -245,22 +246,37 @@ public sealed class WebServer : IDisposable
 
     private static IPAddress Normalize(IPAddress a) => a.IsIPv4MappedToIPv6 ? a.MapToIPv4() : a;
 
+    private bool IsTrustedProxy(IPAddress address)
+    {
+        foreach (var network in _settings.TrustedProxies)
+            if (network.Contains(address))
+                return true;
+        return false;
+    }
+
+    /// <summary>
+    /// The browser's address. Behind a trusted reverse proxy this is the last X-Forwarded-For
+    /// entry: the one the proxy itself appended. Earlier entries come from the client and can
+    /// be forged.
+    /// </summary>
+    private IPAddress ClientAddress(IPAddress remote, Dictionary<string, string> headers)
+    {
+        if (!IsTrustedProxy(remote) || !headers.TryGetValue("x-forwarded-for", out var xff))
+            return remote;
+        var last = xff.Split(',')[^1].Trim();
+        return IPAddress.TryParse(last, out var forwarded) ? Normalize(forwarded) : remote;
+    }
+
     private async Task HandleConnection(TcpClient client)
     {
         var remote = Normalize(((IPEndPoint)client.Client.RemoteEndPoint!).Address);
-        var counted = false;
+        IPAddress? counted = null;
         try
         {
             using (client)
             {
                 if (_sessions.Count >= _settings.MaxConnections)
                     return;
-                if (_perIp.AddOrUpdate(remote, 1, (_, n) => n + 1) > _settings.MaxConnectionsPerIp)
-                {
-                    counted = true;
-                    return;
-                }
-                counted = true;
 
                 client.NoDelay = true;
                 var stream = client.GetStream();
@@ -269,11 +285,14 @@ public sealed class WebServer : IDisposable
                     return;
                 var (method, path, headers) = request.Value;
 
-                var address = remote;
-                if (_settings.TrustForwardedFor && IPAddress.IsLoopback(remote)
-                    && headers.TryGetValue("x-forwarded-for", out var xff)
-                    && IPAddress.TryParse(xff.Split(',')[0].Trim(), out var forwarded))
-                    address = Normalize(forwarded);
+                // Count per browser, not per socket: behind a proxy every socket has the proxy's address
+                var address = ClientAddress(remote, headers);
+                counted = address;
+                if (_perIp.AddOrUpdate(address, 1, (_, n) => n + 1) > _settings.MaxConnectionsPerIp)
+                {
+                    await WriteResponse(stream, 429, "text/plain", "Too Many Connections"u8.ToArray(), false);
+                    return;
+                }
 
                 var query = path.IndexOf('?');
                 if (query >= 0)
@@ -313,8 +332,8 @@ public sealed class WebServer : IDisposable
         }
         finally
         {
-            if (counted)
-                _perIp.AddOrUpdate(remote, 0, (_, n) => Math.Max(0, n - 1));
+            if (counted != null)
+                _perIp.AddOrUpdate(counted, 0, (_, n) => Math.Max(0, n - 1));
         }
     }
 
@@ -352,7 +371,7 @@ public sealed class WebServer : IDisposable
 
     private static async Task WriteResponse(NetworkStream stream, int status, string type, byte[] body, bool headOnly)
     {
-        var reason = status switch { 200 => "OK", 404 => "Not Found", 405 => "Method Not Allowed", _ => "Error" };
+        var reason = status switch { 200 => "OK", 404 => "Not Found", 405 => "Method Not Allowed", 429 => "Too Many Requests", _ => "Error" };
         var head = $"HTTP/1.1 {status} {reason}\r\nContent-Type: {type}\r\nContent-Length: {body.Length}\r\n" +
                    "Cache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n" +
                    "Referrer-Policy: no-referrer\r\nConnection: close\r\n\r\n";

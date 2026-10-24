@@ -71,7 +71,7 @@ Requires Metamod:Source 2.0 (dev build 1461 or later) and
 | `PublicUrl` | `""` | Link shown to players, e.g. `http://example.com:27030` (default: `http://SERVER-IP:Port`) |
 | `TapPort` | `27031` | Localhost UDP port between the Metamod tap and this plugin. The tap reads it from this file too and follows changes within 5 seconds; reload the plugin after changing it |
 | `SuppressGameVoiceForListeners` | `true` | Hold back in-game voice for players listening in a browser |
-| `TrustForwardedFor` | `false` | Behind a reverse proxy on the same machine, use its `X-Forwarded-For` to identify players |
+| `TrustedProxies` | `[]` | Reverse proxies (IPs or CIDR ranges) whose `X-Forwarded-For` identifies the browser, e.g. `["127.0.0.1", "172.16.0.0/12"]` for a proxy on the same machine or in Docker. Empty means no proxy |
 | `AnnounceOnJoin` | `true` | Tell joining players about the page (at most once every few hours each) |
 | `MaxConnectionsPerIp` | `6` | Browser connections allowed per IP |
 
@@ -83,15 +83,28 @@ change `Port` and open the new TCP port in the firewall.
 
 ### Behind a reverse proxy
 
-The page also works under a path on an existing site, e.g. `https://example.com/voice/`. Proxy
-both HTTP and the WebSocket at `/voice/ws` to `127.0.0.1:27030`, and set `TrustForwardedFor` to
-`true` so players are matched by their real IP. For Apache (`mod_proxy_http`, `mod_proxy_wstunnel`):
+The page also works under a path on an existing site, e.g. `https://example.com/voice/`, which
+also gives it HTTPS. Proxy both HTTP and the WebSocket at `/voice/ws` to the plugin, and list the
+proxy's address in `TrustedProxies` so players are matched by their real IP (the plugin uses the
+last `X-Forwarded-For` entry, the one your proxy adds). For Apache 2.4.47+ with `mod_proxy_http`:
 
 ```apache
-ProxyPass        /voice/ws  ws://127.0.0.1:27030/ws
+ProxyPass        /voice/ws  http://127.0.0.1:27030/ws upgrade=websocket
 ProxyPass        /voice/    http://127.0.0.1:27030/
 ProxyPassReverse /voice/    http://127.0.0.1:27030/
 ```
+
+If Apache runs in Docker, use `host.docker.internal` (with `extra_hosts:
+["host.docker.internal:host-gateway"]`) instead of `127.0.0.1`, and trust the Docker range,
+e.g. `"TrustedProxies": ["172.16.0.0/12"]`. The plugin's port then doesn't need to be open to
+the internet at all.
+
+### Embedding the player in your own site
+
+To give the player your site's look, serve your own page at the proxied path (e.g. `/voice/`)
+and only proxy `/voice/ws`, `/voice/app.js` and `/voice/opus-decoder.min.js` to the plugin. Your
+page loads `opus-decoder.min.js` and `app.js` and provides the element ids listed at the top of
+[`plugin/web/app.js`](plugin/web/app.js); `plugin/web/index.html` is a complete example.
 
 ## Notes and limitations
 

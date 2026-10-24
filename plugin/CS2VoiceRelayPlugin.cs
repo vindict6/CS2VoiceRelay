@@ -21,8 +21,11 @@ public class RelayConfig : BasePluginConfig
     [JsonPropertyName("TapPort")] public int TapPort { get; set; } = 27031;
     /// <summary>Hold back in-game voice for players who are listening in a browser, so they don't hear it twice.</summary>
     [JsonPropertyName("SuppressGameVoiceForListeners")] public bool SuppressGameVoiceForListeners { get; set; } = true;
-    /// <summary>Use X-Forwarded-For from a reverse proxy on this machine (only set when behind one).</summary>
-    [JsonPropertyName("TrustForwardedFor")] public bool TrustForwardedFor { get; set; } = false;
+    /// <summary>
+    /// Reverse proxies (IPs or CIDR ranges) whose X-Forwarded-For identifies the browser, e.g.
+    /// ["127.0.0.1", "172.16.0.0/12"] for a proxy on this machine or in Docker. Empty: no proxy.
+    /// </summary>
+    [JsonPropertyName("TrustedProxies")] public List<string> TrustedProxies { get; set; } = new();
     [JsonPropertyName("AnnounceOnJoin")] public bool AnnounceOnJoin { get; set; } = true;
     [JsonPropertyName("MaxConnectionsPerIp")] public int MaxConnectionsPerIp { get; set; } = 6;
     [JsonPropertyName("ChatPrefix")] public string ChatPrefix { get; set; } = " \u0004[Voice]\u0001";
@@ -60,7 +63,21 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         if (!IPAddress.TryParse(config.BindAddress, out _))
             throw new Exception($"BindAddress '{config.BindAddress}' is not an IP address");
         config.MaxConnectionsPerIp = Math.Clamp(config.MaxConnectionsPerIp, 1, 64);
+        foreach (var entry in config.TrustedProxies)
+            if (!TryParseNetwork(entry, out _))
+                throw new Exception($"TrustedProxies entry '{entry}' is not an IP address or CIDR range");
         Config = config;
+    }
+
+    private static bool TryParseNetwork(string text, out IPNetwork network)
+    {
+        text = text.Trim();
+        if (IPAddress.TryParse(text, out var single))
+        {
+            network = new IPNetwork(single, single.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128);
+            return true;
+        }
+        return IPNetwork.TryParse(text, out network);
     }
 
     public override void Load(bool hotReload)
@@ -70,7 +87,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
             {
                 BindAddress = Config.BindAddress,
                 Port = Config.Port,
-                TrustForwardedFor = Config.TrustForwardedFor,
+                TrustedProxies = Config.TrustedProxies.Select(t => { TryParseNetwork(t, out var n); return n; }).ToList(),
                 MaxConnectionsPerIp = Config.MaxConnectionsPerIp,
             },
             () => _snapshot,
