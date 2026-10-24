@@ -1,6 +1,6 @@
 # CS2VoiceRelay
 
-Hear in-game voice in your browser when CS2 stops playing it. Comes with a live scoreboard.
+Hear in-game voice in your browser. Comes with a live scoreboard.
 
 > If you like this and it's useful on your server, please consider supporting it:
 > [buymeacoffee.com/theboneman](https://buymeacoffee.com/theboneman). It keeps me building and
