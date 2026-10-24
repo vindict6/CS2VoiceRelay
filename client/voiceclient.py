@@ -31,7 +31,7 @@ import sounddevice as sd
 from pynput import keyboard, mouse
 
 APP_NAME = "CS2VoiceRelay"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 MAGIC = b"CVR1"
 T_HELLO, T_AUDIO, T_PING, T_PONG, T_BYE, T_WELCOME, T_SPEAK, T_STATE = 1, 2, 3, 4, 5, 6, 7, 8

@@ -20,6 +20,12 @@ jobs:
           dotnet-version: "10.0.x"
       - name: Build
         run: dotnet publish plugin/CS2VoiceRelay.csproj -c Release -o out/addons/counterstrikesharp/plugins/CS2VoiceRelay
+      - name: Check output
+        run: |
+          ls -la out/addons/counterstrikesharp/plugins/CS2VoiceRelay
+          if ls out/addons/counterstrikesharp/plugins/CS2VoiceRelay | grep -qv '^CS2VoiceRelay\.'; then
+            echo '::error::Plugin output contains dependency DLLs; CounterStrikeSharp must not be bundled'; exit 1
+          fi
       - name: Package
         run: cd out && zip -r ../CS2VoiceRelay-plugin.zip addons
       - uses: actions/upload-artifact@v4

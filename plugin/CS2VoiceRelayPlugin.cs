@@ -33,7 +33,7 @@ public class RelayConfig : BasePluginConfig
 public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 {
     public override string ModuleName => "CS2VoiceRelay";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Out-of-game voice relay that survives workshop map changes";
 

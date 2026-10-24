@@ -5,10 +5,15 @@
     <Nullable>enable</Nullable>
     <AssemblyName>CS2VoiceRelay</AssemblyName>
     <RootNamespace>CS2VoiceRelay</RootNamespace>
-    <!-- CounterStrikeSharp ships its own copies of its dependencies; don't bundle them with the plugin -->
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <DebugType>none</DebugType>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.378" />
+    <!-- Compile against CounterStrikeSharp only: the server already provides it and its dependencies,
+         and a second copy in the plugin folder breaks type identity at load time. -->
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.378">
+      <PrivateAssets>all</PrivateAssets>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
   </ItemGroup>
 </Project>
