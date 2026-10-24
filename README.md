@@ -270,7 +270,7 @@ The plugin serves a ready-made widget, so embedding the player is one script tag
 
 The [Embedding](https://github.com/vindict6/CS2VoiceRelay/wiki/Embedding) wiki page has the widget's options, a PHP helper, what to do if your
 site uses HTTPS, and how to build your own player on `voice-engine.js`. That's how I run it on
-[OnlyZaps.gg](https://onlyzaps.gg), where it sits above the site's own live scoreboard:
+[OnlyZaps.gg](https://onlyzaps.gg), where it sits above the site's live scoreboard:
 
 ![The voice pane on the OnlyZaps.gg homepage](docs/embed-onlyzaps.png)
 
