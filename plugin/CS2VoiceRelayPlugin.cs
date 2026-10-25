@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes.Registration;
+using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Timers;
@@ -71,6 +72,15 @@ public class RelayConfig : BasePluginConfig
     /// <summary>Put in front of the plugin's chat messages. Color tags work here too.</summary>
     [JsonPropertyName("ChatPrefix")] public string ChatPrefix { get; set; } = " {green}[Voice]{default}";
 
+    /// <summary>
+    /// !adminchat: admins with this CounterStrikeSharp permission can talk to and hear every player,
+    /// both teams, alive or dead. !adminlisten: hear every player, with their own voice still going
+    /// to their team only. Running either again turns it off; both end at map change. Also on the page.
+    /// </summary>
+    [JsonPropertyName("AdminChatPermission")] public string AdminChatPermission { get; set; } = "@css/chat";
+    /// <summary>Tell everyone in chat when an admin starts or stops talking to or listening to everyone.</summary>
+    [JsonPropertyName("AnnounceAdminChat")] public bool AnnounceAdminChat { get; set; } = true;
+
     /// <summary>Show JoinMessage to players when they join. false (or an empty JoinMessage) turns it off.</summary>
     [JsonPropertyName("AnnounceOnJoin")] public bool AnnounceOnJoin { get; set; } = true;
     /// <summary>
@@ -99,7 +109,7 @@ public class RelayConfig : BasePluginConfig
 public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 {
     public override string ModuleName => "CS2VoiceRelay";
-    public override string ModuleVersion => "2.5.0";
+    public override string ModuleVersion => "2.6.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Hear in-game voice in your browser when CS2's voice playback breaks";
 
@@ -112,6 +122,9 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
     private readonly Dictionary<ulong, DateTime> _announced = new();
     private readonly ScoreTracker _scores = new();
     private readonly Dictionary<ulong, DateTime> _lastTestSound = new();
+    private readonly HashSet<int> _adminChat = new();     // player slots with !adminchat on
+    private readonly HashSet<int> _adminListen = new();   // player slots with !adminlisten on
+    private const VoiceFlags AdminFlags = VoiceFlags.All | VoiceFlags.ListenAll;
     private ConVar? _cvHostname, _cvIp;
     private bool _warnedTap;
     private Thread? _worker;
@@ -164,7 +177,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
     /// <summary>
     /// Adds a comment block to the top of CS2VoiceRelay.json listing the chat colors and message
     /// placeholders. CounterStrikeSharp skips comments when it reads the file, and the block is only
-    /// added when it isn't there, so settings are never touched.
+    /// added when it isn't there and refreshed when it's out of date; settings are never touched.
     /// </summary>
     private void AddConfigNotes()
     {
@@ -174,8 +187,6 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
             if (!File.Exists(path))
                 return;
             var text = File.ReadAllText(path);
-            if (text.Contains(ConfigNotesMarker, StringComparison.Ordinal))
-                return;
 
             var colors = typeof(ChatColors).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
                 .Where(f => f.FieldType == typeof(char) && !f.IsDefined(typeof(ObsoleteAttribute), false))
@@ -198,10 +209,38 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
                 "// Logo: image URL (https://...) or a file next to this config, e.g. \"logo.png\" (png, jpg, gif, webp, svg, ico).",
                 "// AccentColor, CtColor, TColor: hex colors like \"#e8a33a\" for buttons and links, and the two teams.",
                 "// TlsCertificate, TlsPrivateKey: PEM files (e.g. Let's Encrypt fullchain.pem, privkey.pem) to serve HTTPS on Port too.",
+                "// AdminChatPermission: who can use !adminchat (talk to and hear everyone) and !adminlisten (hear everyone), e.g. \"@css/chat\".",
+                "// AnnounceAdminChat: tell everyone in chat when an admin starts or stops either.",
                 "// TournamentMode: spectators listening in a browser (and SteamID64s in TournamentListeners) hear every player,",
                 "//   with buttons to solo CT or T. Players on a team still only hear their own team.",
                 "// ----",
             });
+
+            var newline = text.Contains("\r\n") ? "\r\n" : "\n";
+            var block = string.Join(newline, lines) + newline;
+
+            // Already there: refresh it when this version has more to say (only these comment lines change)
+            var start = text.IndexOf(ConfigNotesMarker, StringComparison.Ordinal);
+            if (start >= 0)
+            {
+                var pos = text.IndexOf('\n', start);
+                while (pos >= 0 && pos + 1 < text.Length)
+                {
+                    var next = text.IndexOf('\n', pos + 1);
+                    var line = (next < 0 ? text[(pos + 1)..] : text[(pos + 1)..next]).TrimEnd('\r');
+                    if (line == "// ----")
+                    {
+                        var end = next < 0 ? text.Length : next + 1;
+                        if (text[start..end] != block)
+                            File.WriteAllText(path, text[..start] + block + text[end..]);
+                        return;
+                    }
+                    if (!line.TrimStart().StartsWith("//", StringComparison.Ordinal))
+                        return;   // the notes were edited into something else; leave the file alone
+                    pos = next;
+                }
+                return;
+            }
 
             // Keep CounterStrikeSharp's own "generated by" comment line first
             var insertAt = 0;
@@ -210,8 +249,6 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
                 var eol = text.IndexOf('\n', insertAt);
                 insertAt = eol < 0 ? text.Length : eol + 1;
             }
-            var newline = text.Contains("\r\n") ? "\r\n" : "\n";
-            var block = string.Join(newline, lines) + newline;
             File.WriteAllText(path, text.Insert(insertAt, block));
         }
         catch (Exception e)
@@ -264,7 +301,8 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
             SendCodeToPlayer,
             _prefs,
             ModuleVersion,
-            Logger);
+            Logger,
+            SetAdminModeFromWeb);
         _tap = new TapLink(Config.TapPort, OnTapVoice, Logger);
         _web.Start();
         _tap.Start();
@@ -279,7 +317,22 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         if (Config.ReminderIntervalMinutes > 0)
             AddTimer(Config.ReminderIntervalMinutes * 60f, SendReminders, TimerFlags.REPEAT);
 
-        RegisterListener<Listeners.OnMapStart>(_ => _scores.Reset());
+        RegisterListener<Listeners.OnMapStart>(_ =>
+        {
+            _scores.Reset();
+            _adminChat.Clear();
+            _adminListen.Clear();
+        });
+        // A leaving admin's voice flags must not carry over to whoever gets the slot next
+        RegisterListener<Listeners.OnClientDisconnect>(slot =>
+        {
+            var had = _adminChat.Remove(slot) | _adminListen.Remove(slot);
+            if (!had)
+                return;
+            var player = Utilities.GetPlayerFromSlot(slot);
+            if (player is { IsValid: true })
+                player.VoiceFlags &= ~AdminFlags;
+        });
         RegisterEventHandler<EventPlayerDeath>((e, _) =>
         {
             _scores.OnPlayerDeath(e);
@@ -396,6 +449,15 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
 
     public override void Unload(bool hotReload)
     {
+        // Don't leave anyone talking to or listening to everyone after the plugin goes away
+        foreach (var slot in _adminChat.Union(_adminListen))
+        {
+            var player = Utilities.GetPlayerFromSlot(slot);
+            if (player is { IsValid: true })
+                player.VoiceFlags &= ~AdminFlags;
+        }
+        _adminChat.Clear();
+        _adminListen.Clear();
         _workerStop?.Cancel();
         _worker?.Join(TimeSpan.FromSeconds(2));
         _workerStop?.Dispose();
@@ -417,6 +479,90 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
         var tap = _tap?.TapAlive == true ? "" : "  \u0002(voice tap not running)\u0001";
         var you = player != null ? $"  You: {(listening ? "\u0004listening" : "not connected")}\u0001" : "";
         command.ReplyToCommand($"{Prefix} Browser voice: \u0003{PlayerUrl()}\u0001{you}{tap}");
+    }
+
+    public enum AdminMode { Chat, Listen }
+
+    [ConsoleCommand("css_adminchat", "Admins: talk to and hear every player. Run it again to turn it off.")]
+    [CommandHelper(minArgs: 0, usage: "", whoCanExecute: CommandUsage.CLIENT_ONLY)]
+    public void OnAdminChatCommand(CCSPlayerController? player, CommandInfo command) => AdminCommand(player, command, AdminMode.Chat);
+
+    [ConsoleCommand("css_adminlisten", "Admins: hear every player without talking to them. Run it again to turn it off.")]
+    [CommandHelper(minArgs: 0, usage: "", whoCanExecute: CommandUsage.CLIENT_ONLY)]
+    public void OnAdminListenCommand(CCSPlayerController? player, CommandInfo command) => AdminCommand(player, command, AdminMode.Listen);
+
+    private void AdminCommand(CCSPlayerController? player, CommandInfo command, AdminMode mode)
+    {
+        if (player is not { IsValid: true })
+            return;
+        if (!IsChatAdmin(player))
+        {
+            command.ReplyToCommand($"{Prefix} !admin{(mode == AdminMode.Chat ? "chat" : "listen")} is for admins ({Config.AdminChatPermission.Trim()}).");
+            return;
+        }
+        SetAdminMode(player, mode, !ModeSet(mode).Contains(player.Slot), fromPage: false);
+    }
+
+    private HashSet<int> ModeSet(AdminMode mode) => mode == AdminMode.Chat ? _adminChat : _adminListen;
+
+    private bool IsChatAdmin(CCSPlayerController player)
+    {
+        var permission = Config.AdminChatPermission.Trim();
+        return permission.Length == 0 || AdminManager.PlayerHasPermissions(player, permission);
+    }
+
+    /// <summary>The voice page's admin toggles (web thread): switch on the game thread, checking again there.</summary>
+    private void SetAdminModeFromWeb(ulong steamId, string mode, bool on)
+    {
+        var which = mode == "listen" ? AdminMode.Listen : AdminMode.Chat;
+        Server.NextFrame(() =>
+        {
+            var player = Utilities.GetPlayerFromSteamId(steamId);
+            if (player is { IsValid: true } && IsChatAdmin(player) && on != ModeSet(which).Contains(player.Slot))
+                SetAdminMode(player, which, on, fromPage: true);
+        });
+    }
+
+    /// <summary>
+    /// Admin chat (talk to and hear everyone) or admin listen (hear everyone, talk to your team as
+    /// usual). The voice flags come from both, so turning one off leaves the other working. Game thread.
+    /// </summary>
+    private void SetAdminMode(CCSPlayerController player, AdminMode mode, bool on, bool fromPage)
+    {
+        var set = ModeSet(mode);
+        if (on) set.Add(player.Slot);
+        else set.Remove(player.Slot);
+
+        var flags = player.VoiceFlags & ~AdminFlags;
+        if (_adminChat.Contains(player.Slot))
+            flags |= VoiceFlags.All | VoiceFlags.ListenAll;
+        if (_adminListen.Contains(player.Slot))
+            flags |= VoiceFlags.ListenAll;
+        player.VoiceFlags = flags;
+
+        var how = fromPage ? " (from your voice page)" : "";
+        var name = player.PlayerName;
+        string mine, everyone;
+        if (mode == AdminMode.Chat)
+        {
+            var stillListening = !on && _adminListen.Contains(player.Slot) ? " You're still listening to everyone (admin listen)." : "";
+            mine = on
+                ? $"Admin chat \u0004on\u0001{how}: every player hears you and you hear every player. Turn it off with !adminchat or on the voice page."
+                : $"Admin chat \u0002off\u0001{how}. Your voice goes to your team again.{stillListening}";
+            everyone = on ? $"Admin \u0010{name}\u0001 is talking to everyone." : $"\u0010{name}\u0001 stopped talking to everyone.";
+        }
+        else
+        {
+            mine = on
+                ? $"Admin listen \u0004on\u0001{how}: you hear every player. Your own voice still only goes to your team. Turn it off with !adminlisten or on the voice page."
+                : $"Admin listen \u0002off\u0001{how}.";
+            everyone = on ? $"Admin \u0010{name}\u0001 is listening to everyone." : $"\u0010{name}\u0001 stopped listening to everyone.";
+        }
+        player.PrintToChat($"{Prefix} {mine}");
+        if (Config.AnnounceAdminChat)
+            Server.PrintToChatAll($"{Prefix} {everyone}");
+        Logger.LogInformation("Admin {Mode} {State} for {Name} ({SteamId}){How}", mode, on ? "on" : "off", name, player.SteamID, how);
+        RefreshSnapshot();   // the page's toggles show the new state on the next update
     }
 
     [ConsoleCommand("css_testvoice", "Play a test chime on your browser voice page")]
@@ -489,7 +635,8 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
                     addr = parsed;
             }
 
-            var info = new PlayerInfo(p.Slot, p.SteamID, p.PlayerName, p.TeamNum, p.PawnIsAlive, addr);
+            var info = new PlayerInfo(p.Slot, p.SteamID, p.PlayerName, p.TeamNum, p.PawnIsAlive, addr,
+                IsChatAdmin(p), _adminChat.Contains(p.Slot), _adminListen.Contains(p.Slot));
             bySlot[p.Slot] = info;
             bySteam[p.SteamID] = info;
         }

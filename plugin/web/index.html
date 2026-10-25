@@ -53,6 +53,10 @@
   .volume { display: grid; grid-template-columns: auto 1fr 52px auto; align-items: center; gap: 12px; }
   .volume .label { font-weight: 600; }
   .volume .value { text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
+  .even { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+  .even button { padding: 6px 12px; font-size: 13px; }
+  #admin-chat[aria-pressed="true"], #admin-listen[aria-pressed="true"] { background: var(--bad); color: #fff; border-color: transparent; font-weight: 700; }
+  .even button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 700; }
   .choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   .code { display: flex; gap: 8px; margin-top: 12px; }
   .code input { font: inherit; font-size: 20px; letter-spacing: 6px; width: 140px; text-align: center; padding: 8px;
@@ -169,6 +173,15 @@
             <button type="button" data-team="2" aria-pressed="false">T only</button>
           </div>
           <span class="muted" style="font-size:13px">Tournament mode: you're hearing every player.</span>
+        </div>
+        <div class="even hidden" id="admin-row">
+          <button type="button" id="admin-chat" aria-pressed="false">Admin chat: Off</button>
+          <button type="button" id="admin-listen" aria-pressed="false">Admin listen: Off</button>
+          <span class="muted">Chat: talk to and hear every player. Listen: hear every player, talk to your team.</span>
+        </div>
+        <div class="even">
+          <button type="button" id="normalize" aria-pressed="false">Even out voices: Off</button>
+          <span class="muted">Brings quiet and loud players to a similar volume.</span>
         </div>
         <div class="muted" id="listen-hint">Your browser needs one click before it can play audio.</div>
       </div>

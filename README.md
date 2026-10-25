@@ -33,6 +33,11 @@ next to the game.
   the tab and normal in-game voice is back within two seconds.
 - Volume for everyone and per player, saved on the server for each listener, so it follows you
   to any browser.
+- **Even out voices**: one click brings quiet and loud players to a similar level. Quiet players
+  get boosted (up to +18 dB), loud ones turned down, and background hiss between words is left
+  alone. Your per-player volumes still apply on top. Saved per player like the volumes.
+- **Admin chat and admin listen** for your admins, from chat or with a toggle on the page: talk
+  to and hear every player on both teams, or just listen to everyone.
 - A live scoreboard with the same stats and layout as my
   [CompStats](https://github.com/vindict6/CompStats) readout: K/D/A, HS%, damage, utility damage,
   enemies flashed, KDR, ADR, Zeus kills, MVPs, score, money and ping, with CT and T in their own
@@ -96,15 +101,25 @@ You need Metamod:Source 2.0 (dev build 1461 or later) and
    `addons/counterstrikesharp/configs/plugins/CS2VoiceRelay/CS2VoiceRelay.json`. At least set
    `PublicUrl` so the link players see in chat is right.
 
-Players can type `!voice` in chat to get the link again and see if their browser is connected,
-and `!testvoice` to play a short chime on their voice page. The chime goes through the same path
-as real voice, so if they hear it, everything works. If they don't, the chat reply says why: no
-page linked to them yet, or the page isn't listening.
+Chat commands:
+
+| Command | Who | What it does |
+|---|---|---|
+| `!voice` | everyone | The link to the voice page, and whether your browser is connected |
+| `!testvoice` | everyone | Plays a short chime on your voice page, through the same path as real voice. If you hear it, everything works. If not, the reply says why: no page linked to you yet, or the page isn't listening |
+| `!adminchat` | admins | Talk to and hear every player, both teams, alive or dead. Run it again to turn it off |
+| `!adminlisten` | admins | Hear every player. Your own voice still only goes to your team. Run it again to turn it off |
+
+Admins also get **Admin chat** and **Admin listen** toggles on the voice page, so they don't have
+to type anything. The page only shows them to players with `AdminChatPermission`, and the server
+checks the permission again before switching. Both turn off at map change. With
+`AnnounceAdminChat` on, everyone sees in chat when an admin starts or stops either one, so
+nobody gets listened in on without knowing.
 
 ## Config
 
 The plugin writes the notes at the top of the file itself, with every chat color tag your
-CounterStrikeSharp version has. CounterStrikeSharp ignores the comments when it reads the file.
+CounterStrikeSharp version has, and refreshes them when an update adds settings. CounterStrikeSharp ignores the comments when it reads the file.
 Here's a filled-in example:
 
 ```jsonc
@@ -122,6 +137,8 @@ Here's a filled-in example:
 // Logo: image URL (https://...) or a file next to this config, e.g. "logo.png" (png, jpg, gif, webp, svg, ico).
 // AccentColor, CtColor, TColor: hex colors like "#e8a33a" for buttons and links, and the two teams.
 // TlsCertificate, TlsPrivateKey: PEM files (e.g. Let's Encrypt fullchain.pem, privkey.pem) to serve HTTPS on Port too.
+// AdminChatPermission: who can use !adminchat (talk to and hear everyone) and !adminlisten (hear everyone), e.g. "@css/chat".
+// AnnounceAdminChat: tell everyone in chat when an admin starts or stops either.
 // TournamentMode: spectators listening in a browser (and SteamID64s in TournamentListeners) hear every player,
 //   with buttons to solo CT or T. Players on a team still only hear their own team.
 // ----
@@ -148,6 +165,8 @@ Here's a filled-in example:
   "TrustedProxies": [],
   "MaxConnectionsPerIp": 6,
   "ChatPrefix": " {green}[Voice]{default}",
+  "AdminChatPermission": "@css/chat",
+  "AnnounceAdminChat": true,
   "AnnounceOnJoin": true,
   "JoinMessage": "Voice cutting out after map changes? Open {lightblue}{url}{default} and hit {gold}Start listening{default}.",
   "JoinMessageDelaySeconds": 20,
@@ -184,6 +203,8 @@ minutes for as long as they're not listening:
 | `TrustedProxies` | `[]` | Reverse proxies (IPs or CIDR ranges) whose `X-Forwarded-For` identifies the browser, like `["127.0.0.1", "172.16.0.0/12"]` for a proxy on the same box or in Docker |
 | `MaxConnectionsPerIp` | `6` | Browser connections allowed per player IP |
 | `ChatPrefix` | ` {green}[Voice]{default}` | Goes in front of the plugin's chat messages |
+| `AdminChatPermission` | `@css/chat` | CounterStrikeSharp permission for `!adminchat`, `!adminlisten` and the page's admin toggles. Empty lets everyone use them |
+| `AnnounceAdminChat` | `true` | Tell everyone in chat when an admin starts or stops talking to or listening to everyone |
 | `AnnounceOnJoin` | `true` | Show `JoinMessage` when players join. `false`, or an empty `JoinMessage`, turns it off |
 | `JoinMessage` | a short pointer to the page | The chat message. `{url}`, `{name}` and the color tags above work in it |
 | `JoinMessageDelaySeconds` | `20` | How long after joining the message shows up |

@@ -59,6 +59,9 @@
 .cs2vr-vol{display:grid;grid-template-columns:auto 1fr 42px auto;gap:8px;align-items:center;margin-top:10px}
 .cs2vr-vol span:nth-child(3){color:var(--dim);text-align:right;font-variant-numeric:tabular-nums}
 .cs2vr button.cs2vr-off{color:var(--bad)}
+.cs2vr .cs2vr-even{margin-top:8px;width:100%;font-size:13px}
+.cs2vr .cs2vr-admin[aria-pressed=true]{background:var(--bad);color:#fff;border-color:transparent;font-weight:700}
+.cs2vr .cs2vr-even[aria-pressed=true]{background:var(--a);color:var(--on-a);border-color:transparent;font-weight:700}
 .cs2vr-list{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:4px}
 .cs2vr-list li{display:grid;grid-template-columns:10px 1fr 90px auto;gap:8px;align-items:center;padding:5px 8px;border-radius:8px;background:var(--bg2)}
 .cs2vr-list li.me{grid-template-columns:10px 1fr}
@@ -127,9 +130,18 @@
   const volVal = el("span");
   const volMute = el("button", "", "Mute");
   vol.append(el("span", "", "Volume"), volRange, volVal, volMute);
+  const even = el("button", "cs2vr-even", "Even out voices: Off");
+  even.title = "Brings quiet and loud players to a similar volume";
+  even.setAttribute("aria-pressed", "false");
+  const adminBtn = el("button", "cs2vr-even cs2vr-admin", "Admin chat: Off");
+  adminBtn.title = "Talk to and hear every player, both teams";
+  adminBtn.hidden = true;
+  const listenBtn = el("button", "cs2vr-even cs2vr-admin cs2vr-admin-listen", "Admin listen: Off");
+  listenBtn.title = "Hear every player; your voice still goes to your team only";
+  listenBtn.hidden = true;
   const list = el("ul", "cs2vr-list");
   list.hidden = opt.players === "false";
-  box.append(head, msg, pick, codeRow, go, vol, list);
+  box.append(head, msg, pick, codeRow, go, vol, even, adminBtn, listenBtn, list);
   root.replaceChildren(box);
 
   // Dark or light text on the accent, whichever reads better
@@ -173,6 +185,8 @@
       volVal.textContent = m.volume + "%";
       volMute.textContent = m.muted ? "Muted" : "Mute";
       volMute.classList.toggle("cs2vr-off", m.muted);
+      even.setAttribute("aria-pressed", String(vr.getNormalize()));
+      even.textContent = "Even out voices: " + (vr.getNormalize() ? "On" : "Off");
     }
 
     vr.on("status", (s) => {
@@ -208,6 +222,12 @@
 
     vr.on("state", (st) => {
       online = st.online;
+      adminBtn.hidden = !st.admin;
+      adminBtn.setAttribute("aria-pressed", String(st.adminChat));
+      adminBtn.textContent = "Admin chat: " + (st.adminChat ? "On" : "Off");
+      listenBtn.hidden = !st.admin;
+      listenBtn.setAttribute("aria-pressed", String(st.adminListen));
+      listenBtn.textContent = "Admin listen: " + (st.adminListen ? "On" : "Off");
       renderPlayers(st.players);
       refresh();
     });
@@ -224,6 +244,9 @@
     go.onclick = () => (vr.listening ? vr.stop() : vr.start());
     volRange.oninput = () => vr.setMaster({ volume: Number(volRange.value) });
     volMute.onclick = () => vr.setMaster({ muted: !vr.getMaster().muted });
+    even.onclick = () => vr.setNormalize(!vr.getNormalize());
+    adminBtn.onclick = () => vr.setAdminChat(!(vr.state && vr.state.adminChat));
+    listenBtn.onclick = () => vr.setAdminListen(!(vr.state && vr.state.adminListen));
 
     function renderPlayers(players) {
       const old = new Map([...list.children].map((li) => [li.dataset.id, li]));

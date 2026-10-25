@@ -3,7 +3,7 @@
 // The page needs elements with these ids:
 //   conn, identify-none, your-ip, identify-choose, choices, code-row, code, code-go,
 //   code-hint, code-error, main, offline, host, map, me, listen, master, master-value,
-//   master-mute, listen-hint, version, solo (tournament team solo, buttons with data-team), and for the scoreboard: scoreboard, status-line,
+//   master-mute, normalize, admin-row, admin-chat, admin-listen, listen-hint, version, solo (tournament team solo, buttons with data-team), and for the scoreboard: scoreboard, status-line,
 //   teams-line, board, board-rows, zeus-line
 // It toggles the class "hidden" to show and hide sections, sets data-state="ok|warn|bad" on
 // #conn and data-listening on #listen, and builds scoreboard rows from the classes team-N,
@@ -99,11 +99,18 @@
     lastMap = st.map;
     $("offline").classList.toggle("hidden", !me || st.online);
     $("solo").classList.toggle("hidden", !st.allVoice);
+    // Admin chat toggle, only for admins (the server decides)
+    $("admin-row").classList.toggle("hidden", !st.admin);
+    $("admin-chat").setAttribute("aria-pressed", String(st.adminChat));
+    $("admin-chat").textContent = "Admin chat: " + (st.adminChat ? "On" : "Off");
+    $("admin-listen").setAttribute("aria-pressed", String(st.adminListen));
+    $("admin-listen").textContent = "Admin listen: " + (st.adminListen ? "On" : "Off");
     renderBoard(st.board);
   });
 
   vr.on("prefs", () => {
     applyMaster();
+    applyNormalize();
     applySolo();
     for (const row of $("board-rows").children) if (row.dataset.id) syncRow(row);
   });
@@ -306,6 +313,17 @@
   };
   $("master-mute").onclick = () => vr.setMaster({ muted: !vr.getMaster().muted });
   applyMaster();
+
+  // Even out voices, saved for this player like the volumes
+  function applyNormalize() {
+    const on = vr.getNormalize();
+    $("normalize").setAttribute("aria-pressed", String(on));
+    $("normalize").textContent = "Even out voices: " + (on ? "On" : "Off");
+  }
+  $("normalize").onclick = () => vr.setNormalize(!vr.getNormalize());
+  $("admin-chat").onclick = () => vr.setAdminChat(!(vr.state && vr.state.adminChat));
+  $("admin-listen").onclick = () => vr.setAdminListen(!(vr.state && vr.state.adminListen));
+  applyNormalize();
 
   // Tournament mode: hear everyone, or solo one team
   function applySolo() {

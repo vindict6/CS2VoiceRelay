@@ -8,7 +8,10 @@
 //                               s.ip (waiting), s.choices (choose), s.me, s.name (linked)
 //   vr.on("state", st => ...)   st.map, st.host, st.online, st.players [{id, name, team, alive}],
 //                               st.board (scoreboard, or null when the server turns it off),
-//                               st.tournament (server in tournament mode), st.allVoice (you hear every player)
+//                               st.tournament (server in tournament mode), st.allVoice (you hear every player),
+//                               st.admin (you may use the admin toggles), st.adminChat, st.adminListen (on for you)
+//   vr.setAdminChat(on)         admins: talk to and hear every player in game, like !adminchat
+//   vr.setAdminListen(on)       admins: hear every player, own voice to your team only, like !adminlisten
 //   vr.getSolo() -> 0 | 2 | 3;  vr.setSolo(team)   with allVoice: hear everyone (0), only T (2) or only CT (3)
 //   vr.on("prefs", () => ...)   volume settings changed (from the server or this page)
 //   vr.on("test", () => ...)    the player typed !testvoice: a test chime is about to play
@@ -16,6 +19,7 @@
 //   await vr.start()            call from a click: browsers only allow audio after a user gesture
 //   vr.stop(); vr.choose(id); vr.submitCode(code)
 //   vr.getMaster() -> {volume, muted};  vr.setMaster({volume, muted})
+//   vr.getNormalize() -> bool;  vr.setNormalize(on)   even out voices: quiet and loud players at a similar level
 //   vr.getPlayer(id) -> {vol, muted};   vr.setPlayer(id, {vol, muted})
 //   vr.isSpeaking(id)
 (function (global) {
@@ -23,6 +27,20 @@
 
   const JITTER = 0.08;          // seconds of buffer before a talk spurt starts
   const SPEAKING_MS = 350;
+
+  // Even out voices: each speaker's loudness is tracked over about a second of speech and
+  // their gain moves toward a common level: quiet players up by as much as 18 dB, loud ones
+  // down by as much as 12 dB. Frames 20 dB or more below that player's own speaking level
+  // (breathing, background noise) never get boosted, so raising quiet players doesn't raise hiss.
+  // This runs on the decoded samples, before each player's own volume, so volume still applies.
+  const NORM_TARGET = 0.1;      // RMS, about -20 dBFS
+  const NORM_GATE = 0.004;      // RMS, about -48 dBFS: below this it's never speech
+  const NORM_NOISE = 0.1;       // under a tenth of the player's level (-20 dB): noise, not boosted
+  const NORM_LEVEL_RATE = 0.04; // per 20 ms frame: settles in about a second of talking
+  const NORM_RISE = 0.5;        // per frame, gain catching up when speech starts (no lost syllables)
+  const NORM_FALL = 0.2;        // per frame, gain easing back while they talk
+  const NORM_DROP = 0.7;        // per frame, gain dropping once they stop and it's just noise
+  const NORM_MIN = 0.25, NORM_MAX = 8;
 
   const store = {
     get(key, fallback) {
@@ -71,6 +89,8 @@
     // Volume settings: localStorage until the server sends this player's saved copy
     let master = { volume: clampVolume(store.get("cvr.master", 100)), muted: !!store.get("cvr.masterMuted", false) };
     let players = store.get("cvr.players", {}) || {};
+    let normalize = !!store.get("cvr.normalize", false);
+    let limiter = null;
     let solo = [2, 3].includes(store.get("cvr.solo", 0)) ? store.get("cvr.solo", 0) : 0;
     const teamOf = new Map();     // steamid -> team, from the latest state
 
@@ -90,7 +110,11 @@
           ctx = new (global.AudioContext || global.webkitAudioContext)({ latencyHint: "interactive" });
           masterGain = ctx.createGain();
           masterGain.gain.value = masterValue();
-          masterGain.connect(ctx.destination);
+          // Catches peaks when quiet voices are boosted; transparent while evening out is off
+          limiter = ctx.createDynamicsCompressor();
+          applyLimiter();
+          masterGain.connect(limiter);
+          limiter.connect(ctx.destination);
         }
         await ctx.resume();
         engine.listening = true;
@@ -117,6 +141,18 @@
         saveLocal();
         applyMaster();
         send({ t: "pref", master: master.volume, masterMuted: master.muted });
+        emit("prefs");
+      },
+
+      setAdminChat(on) { send({ t: "adminchat", on: !!on }); },
+      setAdminListen(on) { send({ t: "adminlisten", on: !!on }); },
+
+      getNormalize() { return normalize; },
+      setNormalize(on) {
+        normalize = !!on;
+        saveLocal();
+        applyLimiter();
+        send({ t: "pref", normalize });
         emit("prefs");
       },
 
@@ -228,7 +264,7 @@
         case "state":
           engine.state = {
             map: m.map || "", host: m.host || "", online: !!m.online, players: m.players || [], board: m.board || null,
-            tournament: !!m.tournament, allVoice: !!m.allVoice,
+            tournament: !!m.tournament, allVoice: !!m.allVoice, admin: !!m.admin, adminChat: !!m.adminChat, adminListen: !!m.adminListen,
           };
           teamOf.clear();
           for (const p of engine.state.players) teamOf.set(p.id, p.team);
@@ -240,12 +276,14 @@
     // The server's saved copy wins; if it has nothing yet, upload what this browser has
     function onServerPrefs(m) {
       const local = { master: master.volume, masterMuted: master.muted, players };
-      const localHasData = master.volume !== 100 || master.muted || Object.keys(players).length > 0;
+      const localHasData = master.volume !== 100 || master.muted || normalize || Object.keys(players).length > 0;
       if (m.empty) {
-        if (localHasData) send({ t: "prefs_set", master: local.master, masterMuted: local.masterMuted, players: local.players });
+        if (localHasData) send({ t: "prefs_set", master: local.master, masterMuted: local.masterMuted, players: local.players, normalize });
         return;
       }
       master = { volume: clampVolume(m.master), muted: !!m.masterMuted };
+      normalize = !!m.normalize;
+      applyLimiter();
       players = {};
       for (const [id, p] of Object.entries(m.players || {})) players[id] = { vol: clampVolume(p.vol), muted: !!p.muted };
       saveLocal();
@@ -258,6 +296,37 @@
       store.set("cvr.master", master.volume);
       store.set("cvr.masterMuted", master.muted);
       store.set("cvr.players", players);
+      store.set("cvr.normalize", normalize);
+    }
+
+    function applyLimiter() {
+      if (!limiter) return;
+      const t = ctx.currentTime;
+      limiter.threshold.setValueAtTime(normalize ? -6 : 0, t);
+      limiter.knee.setValueAtTime(normalize ? 4 : 0, t);
+      limiter.ratio.setValueAtTime(normalize ? 12 : 1, t);
+      limiter.attack.setValueAtTime(0.003, t);
+      limiter.release.setValueAtTime(0.15, t);
+    }
+
+    // Scales one decoded frame toward the common level (or back to 1 when off), ramping
+    // across the frame so there are no clicks. Changes the samples in place.
+    function evenOut(s, samples) {
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+      const rms = Math.sqrt(sum / samples.length);
+      // Speech: above the floor, and for a known player not far below how loud they talk
+      const speech = rms > NORM_GATE && rms > s.level * NORM_NOISE;
+      // Only clear speech moves the level, so soft syllables don't drag it down
+      if (rms > NORM_GATE && rms > s.level * 0.3) s.level = s.level ? s.level + (rms - s.level) * NORM_LEVEL_RATE : rms;
+      let target = normalize && s.level ? Math.min(NORM_MAX, Math.max(NORM_MIN, NORM_TARGET / s.level)) : 1;
+      if (!speech) target = Math.min(target, 1);   // never boost noise
+      const from = s.agc;
+      const to = from + (target - from) * (target > from ? NORM_RISE : speech ? NORM_FALL : NORM_DROP);
+      if (from === 1 && to === 1) return;
+      const step = (to - from) / samples.length;
+      for (let i = 0; i < samples.length; i++) samples[i] *= from + step * i;
+      s.agc = Math.abs(to - 1) < 1e-4 ? 1 : to;
     }
 
     function masterValue() {
@@ -281,7 +350,7 @@
       const dec = new global["opus-decoder"].OpusDecoder({
         channels: 1, streamCount: 1, coupledStreamCount: 0, channelMappingTable: [0], sampleRate: 48000,
       });
-      s = { gain, dec, ready: false, queue: [], nextTime: 0, last: 0 };
+      s = { gain, dec, ready: false, queue: [], nextTime: 0, last: 0, level: 0, agc: 1 };
       dec.ready.then(() => {
         s.ready = true;
         for (const f of s.queue) play(s, f);
@@ -323,8 +392,10 @@
       let out;
       try { out = s.dec.decodeFrame(frame); } catch { return; }
       if (!out || !out.samplesDecoded) return;
+      const samples = out.channelData[0];
+      evenOut(s, samples);
       const audio = ctx.createBuffer(1, out.samplesDecoded, out.sampleRate);
-      audio.copyToChannel(out.channelData[0], 0);
+      audio.copyToChannel(samples, 0);
       const src = ctx.createBufferSource();
       src.buffer = audio;
       src.connect(s.gain);

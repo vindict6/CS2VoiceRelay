@@ -15,7 +15,8 @@ using Microsoft.Extensions.Logging;
 namespace CS2VoiceRelay;
 
 /// <summary>What the web side needs to know about a player. Built on the game thread.</summary>
-public sealed record PlayerInfo(int Slot, ulong SteamId, string Name, int Team, bool Alive, IPAddress? Address);
+public sealed record PlayerInfo(int Slot, ulong SteamId, string Name, int Team, bool Alive, IPAddress? Address,
+    bool Admin = false, bool AdminChat = false, bool AdminListen = false);
 
 /// <summary>Immutable view of the server, swapped in by the game thread twice a second.</summary>
 public sealed class ServerSnapshot
@@ -127,8 +128,13 @@ public sealed class WebServer : IDisposable
     private DateTime _tlsChecked = DateTime.MinValue;
     private string? _tlsError;
 
-    public WebServer(WebSettings settings, Func<ServerSnapshot> snapshot, Action<ulong, string> sendCodeToPlayer, PrefsStore prefs, string version, ILogger log)
+    /// <summary>Turns admin "chat" or "listen" on or off for a player; called from a web thread, the plugin hops to the game thread.</summary>
+    private readonly Action<ulong, string, bool>? _setAdminMode;
+
+    public WebServer(WebSettings settings, Func<ServerSnapshot> snapshot, Action<ulong, string> sendCodeToPlayer, PrefsStore prefs, string version, ILogger log,
+        Action<ulong, string, bool>? setAdminMode = null)
     {
+        _setAdminMode = setAdminMode;
         _settings = settings;
         _snapshot = snapshot;
         _sendCodeToPlayer = sendCodeToPlayer;
@@ -466,6 +472,7 @@ public sealed class WebServer : IDisposable
         {
             if (s.SteamId == 0)
                 Identify(s, snap);
+            snap.BySteamId.TryGetValue(s.SteamId, out var self);
             s.SendJson(new
             {
                 t = "state",
@@ -477,6 +484,10 @@ public sealed class WebServer : IDisposable
                 board,
                 tournament = _settings.TournamentMode,
                 allVoice = s.SteamId != 0 && allVoice.Contains(s.SteamId),
+                // Only about this browser's own player: may they use admin chat, and is it on
+                admin = self?.Admin ?? false,
+                adminChat = self?.AdminChat ?? false,
+                adminListen = self?.AdminListen ?? false,
             });
         }
     }
@@ -525,6 +536,7 @@ public sealed class WebServer : IDisposable
             empty = p == null,
             master = p?.Master ?? 100,
             masterMuted = p?.MasterMuted ?? false,
+            normalize = p?.Normalize ?? false,
             players = p?.Players ?? new Dictionary<string, PlayerPref>(),
         });
     }
@@ -549,7 +561,9 @@ public sealed class WebServer : IDisposable
                 // A single change: master volume/mute, or one speaker's volume/mute
                 if (s.SteamId == 0)
                     return;
-                if (m.TryGetProperty("id", out var speakerEl) && ulong.TryParse(speakerEl.GetString(), out var speaker))
+                if (ReadBool(m, "normalize") is bool normalize)
+                    _prefs.SetNormalize(s.SteamId, normalize);
+                else if (m.TryGetProperty("id", out var speakerEl) && ulong.TryParse(speakerEl.GetString(), out var speaker))
                     _prefs.SetPlayer(s.SteamId, speaker, ReadInt(m, "vol") ?? 100, ReadBool(m, "muted") ?? false);
                 else
                     _prefs.SetMaster(s.SteamId, ReadInt(m, "master"), ReadBool(m, "masterMuted"));
@@ -570,7 +584,19 @@ public sealed class WebServer : IDisposable
                             players.Add((sid, ReadInt(entry.Value, "vol") ?? 100, ReadBool(entry.Value, "muted") ?? false));
                     }
                 }
-                _prefs.Replace(s.SteamId, ReadInt(m, "master") ?? 100, ReadBool(m, "masterMuted") ?? false, players);
+                _prefs.Replace(s.SteamId, ReadInt(m, "master") ?? 100, ReadBool(m, "masterMuted") ?? false, players,
+                    ReadBool(m, "normalize") ?? false);
+                break;
+
+            case "adminchat":
+            case "adminlisten":
+                // The page's admin toggles. Only for a linked player the server sees as an admin right
+                // now; the plugin checks the permission again on the game thread.
+                if (s.SteamId == 0 || _setAdminMode == null || !snap.BySteamId.TryGetValue(s.SteamId, out var adminPlayer) || !adminPlayer.Admin)
+                    return;
+                var listen = type == "adminlisten";
+                _setAdminMode(s.SteamId, listen ? "listen" : "chat",
+                    ReadBool(m, "on") ?? !(listen ? adminPlayer.AdminListen : adminPlayer.AdminChat));
                 break;
 
             case "choose":

@@ -16,15 +16,18 @@ public sealed class ListenerPrefs
     [JsonPropertyName("master")] public int Master { get; set; } = 100;
     [JsonPropertyName("masterMuted")] public bool MasterMuted { get; set; }
     [JsonPropertyName("players")] public Dictionary<string, PlayerPref> Players { get; set; } = new();
+    /// <summary>Even out voices: bring quiet and loud players to a similar level in the browser.</summary>
+    [JsonPropertyName("normalize")] public bool Normalize { get; set; }
     [JsonPropertyName("updated")] public DateTime Updated { get; set; }
 
     [JsonIgnore]
-    public bool IsDefault => Master == 100 && !MasterMuted && Players.Count == 0;
+    public bool IsDefault => Master == 100 && !MasterMuted && !Normalize && Players.Count == 0;
 
     public ListenerPrefs Copy() => new()
     {
         Master = Master,
         MasterMuted = MasterMuted,
+        Normalize = Normalize,
         Players = Players.ToDictionary(kv => kv.Key, kv => new PlayerPref { Vol = kv.Value.Vol, Muted = kv.Value.Muted }),
         Updated = Updated,
     };
@@ -95,6 +98,8 @@ public sealed class PrefsStore
         });
     }
 
+    public void SetNormalize(ulong listener, bool on) => Update(listener, p => p.Normalize = on);
+
     public void SetPlayer(ulong listener, ulong speaker, int vol, bool muted)
     {
         Update(listener, p =>
@@ -109,12 +114,13 @@ public sealed class PrefsStore
     }
 
     /// <summary>Replaces everything (used once to upload what a browser had before saving moved server-side).</summary>
-    public void Replace(ulong listener, int master, bool masterMuted, IEnumerable<(ulong Speaker, int Vol, bool Muted)> players)
+    public void Replace(ulong listener, int master, bool masterMuted, IEnumerable<(ulong Speaker, int Vol, bool Muted)> players, bool normalize = false)
     {
         Update(listener, p =>
         {
             p.Master = Math.Clamp(master, 0, 200);
             p.MasterMuted = masterMuted;
+            p.Normalize = normalize;
             p.Players.Clear();
             foreach (var (speaker, vol, muted) in players.Take(MaxPlayersPerListener))
             {
