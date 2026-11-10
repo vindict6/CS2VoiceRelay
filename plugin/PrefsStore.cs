@@ -113,7 +113,7 @@ public sealed class PrefsStore
         });
     }
 
-    /// <summary>Replaces everything (used once to upload what a browser had before saving moved server-side).</summary>
+    /// <summary>Replaces all of a listener's settings. Used for the one-time upload of settings a browser kept locally.</summary>
     public void Replace(ulong listener, int master, bool masterMuted, IEnumerable<(ulong Speaker, int Vol, bool Muted)> players, bool normalize = false)
     {
         Update(listener, p =>

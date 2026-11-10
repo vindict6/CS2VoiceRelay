@@ -219,7 +219,7 @@ public class CS2VoiceRelayPlugin : BasePlugin, IPluginConfig<RelayConfig>
             var newline = text.Contains("\r\n") ? "\r\n" : "\n";
             var block = string.Join(newline, lines) + newline;
 
-            // Already there: refresh it when this version has more to say (only these comment lines change)
+            // Block already present: rewrite it if it differs from the current text (only these comment lines change)
             var start = text.IndexOf(ConfigNotesMarker, StringComparison.Ordinal);
             if (start >= 0)
             {

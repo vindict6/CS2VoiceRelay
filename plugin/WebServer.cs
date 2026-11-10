@@ -570,7 +570,7 @@ public sealed class WebServer : IDisposable
                 break;
 
             case "prefs_set":
-                // One-time upload of what this browser had before settings were saved server-side
+                // One-time upload of the settings this browser kept locally, accepted only while the server has none for this player
                 if (s.SteamId == 0 || _prefs.Get(s.SteamId) != null)
                     return;
                 var players = new List<(ulong, int, bool)>();

@@ -3,8 +3,9 @@
 // The page needs elements with these ids:
 //   conn, identify-none, your-ip, identify-choose, choices, code-row, code, code-go,
 //   code-hint, code-error, main, offline, host, map, me, listen, master, master-value,
-//   master-mute, normalize, admin-row, admin-chat, admin-listen, listen-hint, version, solo (tournament team solo, buttons with data-team), and for the scoreboard: scoreboard, status-line,
-//   teams-line, board, board-rows, zeus-line
+//   master-mute, normalize, admin-row, admin-chat, admin-listen, listen-hint, version,
+//   solo (tournament team solo, buttons with data-team), and for the scoreboard:
+//   scoreboard, status-line, teams-line, board, board-rows, zeus-line
 // It toggles the class "hidden" to show and hide sections, sets data-state="ok|warn|bad" on
 // #conn and data-listening on #listen, and builds scoreboard rows from the classes team-N,
 // dead, self, speaking, dot, pname, tag, vctl, value, on. #board gets "no-voice" until the
@@ -99,7 +100,7 @@
     lastMap = st.map;
     $("offline").classList.toggle("hidden", !me || st.online);
     $("solo").classList.toggle("hidden", !st.allVoice);
-    // Admin chat toggle, only for admins (the server decides)
+    // Admin chat and admin listen toggles, shown only to players the server reports as admins
     $("admin-row").classList.toggle("hidden", !st.admin);
     $("admin-chat").setAttribute("aria-pressed", String(st.adminChat));
     $("admin-chat").textContent = "Admin chat: " + (st.adminChat ? "On" : "Off");

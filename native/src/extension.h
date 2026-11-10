@@ -21,7 +21,7 @@
 #define _INCLUDE_CS2VOICERELAY_TAP_H_
 
 #include <ISmmPlugin.h>
-// Metamod's Source 2 headers no longer pull in eiface.h; it has to come before
+// Metamod's Source 2 headers don't include eiface.h, and it has to come before
 // iserver.h, which relies on its forward declarations
 #include <eiface.h>
 #include <igameevents.h>
