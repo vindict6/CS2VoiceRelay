@@ -593,9 +593,10 @@ KHook::Return<bool> CS2VoiceRelayTap::Hook_SendNetMessage(CServerSideClientBase*
 	if (!pClient || !pData)
 		return {KHook::Action::Ignore};
 
-	INetworkMessageInternal* pNetMessage = pData->GetNetMessage();
-	NetMessageInfo_t* info = pNetMessage ? pNetMessage->GetNetMessageInfo() : nullptr;
-	if (!info || info->m_MessageId != SVC_Messages::svc_VoiceData)
+	// CS2 1.41.9.7 made the INetworkMessageInternal handle a plain record without a vtable, so calling
+	// GetNetMessageInfo() on it crashed the server on the first message to a connecting client.
+	// CNetMessage's own vtable is unchanged: ask it for the id instead.
+	if (pData->GetMessageId() != SVC_Messages::svc_VoiceData)
 		return {KHook::Action::Ignore};
 
 	int slot = pClient->GetPlayerSlot().Get();
